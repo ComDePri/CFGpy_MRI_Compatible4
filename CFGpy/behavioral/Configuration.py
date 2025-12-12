@@ -1,4 +1,5 @@
 from dataclasses import dataclass, asdict
+
 from CFGpy._version import __version__ as CFGpy_version
 from CFGpy.behavioral._consts import (CONFIG_PACKAGE, CONFIG_FILENAME, RM2_CONFIG_FILENAME,
                                       CFGPY_VERSION_ERROR, CONFIG_DUMP_EXTENSION, RM2_MRI_CONFIG_FILENAME)
@@ -14,7 +15,8 @@ import sys
 class Configuration:
 
     @classmethod
-    def default(cls, is_rm1: bool = True, is_mri: bool = False):
+
+    def default(cls, is_rm1: bool = False, is_mri: bool = False):
         if is_mri:
             config_filename = RM2_MRI_CONFIG_FILENAME
         elif is_rm1:
@@ -77,13 +79,13 @@ class Configuration:
         ]
 
         missing_fields = []
-        if not self.is_rm1:
+        if self.is_rm1:
             for field in rm1_required:
                 if not hasattr(self, field):
                     missing_fields.append(field)
 
         if missing_fields:
-            raise ValueError(f"Missing required fields for {'rm2' if self.is_rm1 else 'rm1'}: {missing_fields}")
+            raise ValueError(f"Missing required fields for {'rm2' if not self.is_rm1 else 'rm1'}: {missing_fields}")
 
     def _add_CFGpy_version(self):
         if self.CFGPY_VERSION is None:
