@@ -5,16 +5,17 @@ from CFGpy.behavioral._utils import CFGPipelineException
 
 
 class Pipeline:
-    def __init__(self, game_name: str | None = None, game_id: str | None = None, game_version_ids: list[str] | None = None, is_rm1: bool = False, 
+    def __init__(self, game_name: str | None = None, game_id: str | None = None, game_version_ids: list[str] | None = None, is_rm1: bool = False, is_mri: bool = False,
                  output_filename=DEFAULT_FINAL_OUTPUT_FILENAME, config: Configuration = None):
        
         self._game_name = game_name
         self._game_id: str = game_id
         self._game_version_ids = game_version_ids
         self._is_rm1 = is_rm1
-        
+        self._is_mri = is_mri
+
         self.output_filename = output_filename
-        self.config = config or Configuration.default(is_rm1=is_rm1) 
+        self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
         
         self.data_retriever = None
         self.raw_data = None
@@ -107,7 +108,8 @@ class Pipeline:
         This method contains the post-parsing process exclusively. This can be overridden by deriving classes.
         :return: post-parsed data
         """
-        self.postparser = PostParser(parsed_data=self.parsed_data, config=self.config)
+        self.postparser = PostParser(parsed_data=self.parsed_data,
+                                     config=self.config)
         return self.postparser.postparse()
 
     def postparse(self, verbose):
@@ -163,15 +165,15 @@ def main():
     argparser.add_argument("-o", "--output", default=DEFAULT_FINAL_OUTPUT_FILENAME, dest="output_filename",
                         help='Filename of output CSV')
     argparser.add_argument("--rm1", action="store_true", help="Use RM1 data")
+    argparser.add_argument("--mri", action="store_true", help="Load the MRI configuration defaults")
     args = argparser.parse_args()
     
     config: Configuration | None = Configuration.from_yaml(yaml_path=args.config_path) if args.config_path else None
-    
-    pl = Pipeline(game_name=args.game_name, game_id=args.game_id, game_version_ids=args.game_version_ids, is_rm1=(not args.rm1), 
-                  output_filename=args.output_filename, config=config)
+
+    pl = Pipeline(game_name=args.game_name, game_id=args.game_id, game_version_ids=args.game_version_ids,
+                  is_rm1=(not args.rm1), is_mri=args.mri, output_filename=args.output_filename, config=config)
     
     pl.run_pipeline()
-
 
 if __name__ == '__main__':
     main()

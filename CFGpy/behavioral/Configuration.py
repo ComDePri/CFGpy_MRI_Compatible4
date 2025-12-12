@@ -1,6 +1,7 @@
 from dataclasses import dataclass, asdict
 from CFGpy._version import __version__ as CFGpy_version
-from CFGpy.behavioral._consts import CONFIG_PACKAGE, CONFIG_FILENAME, RM2_CONFIG_FILENAME, CFGPY_VERSION_ERROR, CONFIG_DUMP_EXTENSION
+from CFGpy.behavioral._consts import (CONFIG_PACKAGE, CONFIG_FILENAME, RM2_CONFIG_FILENAME,
+                                      CFGPY_VERSION_ERROR, CONFIG_DUMP_EXTENSION, RM2_MRI_CONFIG_FILENAME)
 from CFGpy.behavioral._utils import server_coords_to_binary_shape
 from CFGpy.utils import binary_shape_to_id
 import yaml
@@ -13,14 +14,22 @@ import sys
 class Configuration:
 
     @classmethod
-    def default(cls, is_rm1: bool = True):
-        config_filename = RM2_CONFIG_FILENAME if is_rm1 else CONFIG_FILENAME 
+    def default(cls, is_rm1: bool = True, is_mri: bool = False):
+        if is_mri:
+            config_filename = RM2_MRI_CONFIG_FILENAME
+        elif is_rm1:
+            # Note: In your code, 'is_rm1=True' actually loads RM2_CONFIG_FILENAME.
+            # This variable naming is confusing but consistent with your existing logic.
+            config_filename = RM2_CONFIG_FILENAME
+        else:
+            config_filename = CONFIG_FILENAME
+
         if sys.version_info[1] >= 9:
             config_path = ir.files(CONFIG_PACKAGE).joinpath(config_filename)
         else:
             config_path = ir.path(CONFIG_PACKAGE, config_filename)
         config = cls.from_yaml(config_path)
-        config.is_rm1 = is_rm1
+        config.is_rm1 = is_rm1 or is_mri # MRI config is based on RM2
         return config
 
     @classmethod
@@ -137,7 +146,17 @@ class Configuration:
     MIN_GAME_DURATION_SEC: float
     MAX_PAUSE_DURATION_SEC: float
     MAX_ZSCORE_FOR_OUTLIERS: float
-    
+
+    # --- [NEW] MRI SEGMENTATION FIELDS ---
+    # Set to None to avoid magic numbers.
+    # These will remain None unless loaded from 'default_mri_rm2_config.yml'
+    SEGMENTATION_ALGORITHM: str | None = None
+    MIN_EFFICIENCY_FOR_EXPLOIT: float | None = None
+    MAX_PACE_FOR_MERGE: float | None = None
+    REMOVE_EMPTY_TIME_STEPS: bool | None = None
+    USE_PACE_CRITERION: bool | None = None
+    #  ----------------------------------------------
+
     GAME_NAME: str | None = None
     GAME_ID: str | None = None
     GAME_VERSION_IDS: list[str] | None = None
