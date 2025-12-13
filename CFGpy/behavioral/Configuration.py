@@ -15,7 +15,6 @@ import sys
 class Configuration:
 
     @classmethod
-
     def default(cls, is_rm1: bool = False, is_mri: bool = False):
         if is_mri:
             config_filename = RM2_MRI_CONFIG_FILENAME
@@ -31,7 +30,7 @@ class Configuration:
         else:
             config_path = ir.path(CONFIG_PACKAGE, config_filename)
         config = cls.from_yaml(config_path)
-        config.is_rm1 = is_rm1 or is_mri # MRI config is based on RM2
+        config.is_rm1 = is_rm1 or is_mri  # MRI config is based on RM2
         return config
 
     @classmethod
@@ -85,7 +84,8 @@ class Configuration:
                     missing_fields.append(field)
 
         if missing_fields:
-            raise ValueError(f"Missing required fields for {'rm2' if not self.is_rm1 else 'rm1'}: {missing_fields}")
+            raise ValueError(
+                f"Missing required fields for {'rm2' if not self.is_rm1 else 'rm1'}: {missing_fields}")
 
     def _add_CFGpy_version(self):
         if self.CFGPY_VERSION is None:
@@ -97,7 +97,8 @@ class Configuration:
         self.SHAPE_SAVE_TIME_IDX: int = self.PARSED_GAME_HEADERS.index(self.GALLERY_SAVE_TIME_COLUMN)
 
     def _add_first_shape_id(self) -> None:
-        self.FIRST_SHAPE_ID = binary_shape_to_id(server_coords_to_binary_shape(self.FIRST_SHAPE_SERVER_COORDS))
+        self.FIRST_SHAPE_ID = binary_shape_to_id(
+            server_coords_to_binary_shape(self.FIRST_SHAPE_SERVER_COORDS))
 
     # Class data (unchanged)
 
@@ -157,12 +158,13 @@ class Configuration:
     MAX_PACE_FOR_MERGE: float | None = None
     REMOVE_EMPTY_TIME_STEPS: bool | None = None
     USE_PACE_CRITERION: bool | None = None
+    SHAPE_MAX_MOVE_TIME_IDX: int | None = None
     #  ----------------------------------------------
 
     GAME_NAME: str | None = None
     GAME_ID: str | None = None
     GAME_VERSION_IDS: list[str] | None = None
-    
+
     DOWNLOAD_PLAYER_REQUEST: str = None
     RAW_GAME_VERSION: str = None
     RAW_PLAYER_BIRTHDATE: str = None
@@ -171,5 +173,5 @@ class Configuration:
     RAW_PLAYER_GENDER: str = None
     RAW_PLAYER_EXTERNAL_ID: str = None
     RAW_SECTION: str = None
-    
+
     is_rm1: bool = False

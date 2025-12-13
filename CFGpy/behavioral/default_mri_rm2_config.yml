@@ -15,6 +15,7 @@
   MAX_PACE_FOR_MERGE: 10,             # Strict pace check (vs 10000 in standard)
   REMOVE_EMPTY_TIME_STEPS: true,      # Clean up empty steps (vs False)
   USE_PACE_CRITERION: true,           # Activate robust median logic (vs False)
+  SHAPE_MAX_MOVE_TIME_IDX: 3,     # a new 4th column for max move time (vs 3 in standard)
 
 # --- RM2 DATABASE MAPPINGS (Standard) ---
   ## Raw Data
