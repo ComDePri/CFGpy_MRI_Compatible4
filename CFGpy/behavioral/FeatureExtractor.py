@@ -16,7 +16,8 @@ from CFGpy.behavioral._consts import (FEATURES_ID_KEY, FEATURES_START_TIME_KEY, 
                                       ABSOLUTE_FEATURES_MESSAGE, RELATIVE_FEATURES_MESSAGE, EXPLORE_OUTLIER_REASON,
                                       EXPLOIT_OUTLIER_REASON, NO_EXPLOIT_EXCLUSION_REASON, MANUAL_EXCLUSION_REASON,
                                       GAME_LENGTH_EXCLUSION_REASON, GAME_DURATION_EXCLUSION_REASON,
-                                      PAUSE_EXCLUSION_REASON, SAMPLE_RELATIVE_FEATURES_LABEL)
+                                      PAUSE_EXCLUSION_REASON, SAMPLE_RELATIVE_FEATURES_LABEL,
+                                      ROBUST_MEDIAN_PACE_KEY, ROBUST_THRESHOLD_KEY)
 from CFGpy.behavioral import Configuration
 from CFGpy.behavioral._utils import load_json, is_semantic_connection
 from functools import reduce
@@ -162,6 +163,12 @@ class FeatureExtractor:
             explore_lengths = [end - start for start, end in player_data.explore_slices]
             exploit_lengths = [end - start for start, end in player_data.exploit_slices]
             is_gallery = player_data.get_gallery_mask()
+
+            # TODO: Added from the aviv repo, to handle edge case of no galleries
+            n_galleries = sum(is_gallery)
+            if n_galleries == 0:
+                print(f"Player {player_data.id} has no galleries, skipping...")
+                continue
             is_explore = player_data.get_explore_mask()
 
             # data collection for later vectorized operations
@@ -170,6 +177,10 @@ class FeatureExtractor:
             total_exploit_times.append(player_data.total_exploit_time())
             total_explore_lengths.append(sum(explore_lengths))
             total_exploit_lengths.append(sum(exploit_lengths))
+            # the values that are calculated only in MRI mode
+            # TODO: added, didn't exist in the original MeasureCalculator in "aviv" repo
+            robust_median = getattr(player_data, ROBUST_MEDIAN_PACE_KEY, np.nan)
+            robust_threshold = getattr(player_data, ROBUST_THRESHOLD_KEY, np.nan)
 
             # player-wise calculations
             explore_efficiency, exploit_efficiency = player_data.get_efficiency()
@@ -178,14 +189,16 @@ class FeatureExtractor:
                 FEATURES_START_TIME_KEY: datetime.fromtimestamp(player_data.start_time).isoformat(),
                 GAME_DURATION_KEY: player_data.get_last_action_time(),
                 N_MOVES_KEY: len(player_data),
-                N_GALLERIES_KEY: sum(is_gallery),
+                N_GALLERIES_KEY: n_galleries,
                 SELF_AVOIDANCE_KEY: player_data.get_self_avoidance(),
                 N_CLUSTERS_KEY: len(player_data.exploit_slices),
                 EXPLORE_EFFICIENCY_KEY: explore_efficiency,
                 EXPLOIT_EFFICIENCY_KEY: exploit_efficiency,
                 MEDIAN_EXPLORE_LENGTH_KEY: np.median(explore_lengths),
                 MEDIAN_EXPLOIT_LENGTH_KEY: np.median(exploit_lengths),
-                LONGEST_PAUSE_KEY: player_data.get_max_pause_duration()
+                LONGEST_PAUSE_KEY: player_data.get_max_pause_duration(),
+                ROBUST_MEDIAN_PACE_KEY: robust_median,
+                ROBUST_THRESHOLD_KEY: robust_threshold,
             })
 
         # vectorized operations

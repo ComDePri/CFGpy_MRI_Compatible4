@@ -71,6 +71,12 @@ FRACTION_GALLERIES_UNIQUELY_COVERED_EXPLOIT_KEY = "% galleries uniquely covered 
 N_CLUSTERS_IN_GC_KEY = "# clusters in GC"
 FRACTION_CLUSTERS_IN_GC_KEY = "% clusters in GC"
 
+#################################################
+# MRI-specific features
+ROBUST_MEDIAN_PACE_KEY = "robust_median_exploit_pace"
+ROBUST_THRESHOLD_KEY = "robust_threshold_exploit_pace"
+#################################################
+
 EXCLUSION_REASON_KEY = "reason"
 SAMPLE_RELATIVE_FEATURES_LABEL = "sample"
 EXPLORE_OUTLIER_REASON = "Explore length outlier"

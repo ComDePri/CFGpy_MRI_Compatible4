@@ -4,10 +4,10 @@ from itertools import pairwise, groupby, combinations
 from collections import Counter
 import networkx as nx
 from CFGpy.behavioral._consts import (PARSED_PLAYER_ID_KEY, PARSED_TIME_KEY, PARSED_ALL_SHAPES_KEY,
-                                      PARSED_CHOSEN_SHAPES_KEY, EXPLORE_KEY, EXPLOIT_KEY)
+                                      PARSED_CHOSEN_SHAPES_KEY, EXPLORE_KEY, EXPLOIT_KEY
+                                      ,ROBUST_MEDIAN_PACE_KEY, ROBUST_THRESHOLD_KEY)
 from CFGpy.behavioral import Configuration
 from CFGpy.behavioral._utils import is_semantic_connection, load_json
-
 
 # TODO: consider: some methods only serve MeasureCalculator, while other are meant as API for end users (e.g.
 #  visualizations). This probably means there's a better way to design these classes
@@ -21,6 +21,15 @@ class ParsedPlayerData:
 
         self.config = config if config is not None else Configuration.default()
         self.delta_move_times = np.diff(self.shapes_df.iloc[:, self.config.SHAPE_MOVE_TIME_IDX])
+
+        # --- [INTEGRATION] MRI METRICS ---
+        # If these keys exist in the dictionary (added by PostParser), expose them as attributes.
+        if ROBUST_MEDIAN_PACE_KEY in player_data:
+            setattr(self, ROBUST_MEDIAN_PACE_KEY, player_data[ROBUST_MEDIAN_PACE_KEY])
+
+        if ROBUST_THRESHOLD_KEY in player_data:
+            setattr(self, ROBUST_THRESHOLD_KEY, player_data[ROBUST_THRESHOLD_KEY])
+
 
     def __len__(self):
         return len(self.shapes_df)
