@@ -127,6 +127,13 @@ class Parser:
         return data
 
     def _apply_hard_filters(self, game):
+        # Get the player ID from the current group (game)
+        # We use iloc[0] because all rows in this group belong to the same player
+        player_id = str(game[self.config.UNIQUE_INTERNAL_ID_COLUMN].iloc[0])
+
+        # Check against the exclusion list from config
+        if player_id in self.config.MANUALLY_EXCLUDED_IDS:
+            return False
         return self.is_game_started(game)
 
     def is_game_started(self, game):

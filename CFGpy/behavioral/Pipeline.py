@@ -1,13 +1,18 @@
 from datetime import datetime, timezone
-from CFGpy.behavioral import DataRetriever, RedMetrics1DataRetriever, RedMetrics2DataRetriever, Parser, PostParser, FeatureExtractor, Configuration
+from CFGpy.behavioral import DataRetriever, RedMetrics1DataRetriever, RedMetrics2DataRetriever, Parser, \
+    PostParser, FeatureExtractor, Configuration
 from CFGpy.behavioral._consts import DEFAULT_FINAL_OUTPUT_FILENAME
 from CFGpy.behavioral._utils import CFGPipelineException
+import os
 
 
 class Pipeline:
-    def __init__(self, game_name: str | None = None, game_id: str | None = None, game_version_ids: list[str] | None = None, is_rm1: bool = False, is_mri: bool = False,
-                 output_filename=DEFAULT_FINAL_OUTPUT_FILENAME, config: Configuration = None):
-       
+
+    def __init__(self, game_name: str | None = None, game_id: str | None = None,
+                 game_version_ids: list[str] | None = None, is_rm1: bool = False, is_mri: bool = False,
+                 output_filename=DEFAULT_FINAL_OUTPUT_FILENAME, exclusion_file: str | None = None,
+                 config: Configuration = None):
+
         self._game_name = game_name
         self._game_id: str = game_id
         self._game_version_ids = game_version_ids
@@ -16,7 +21,7 @@ class Pipeline:
 
         self.output_filename = output_filename
         self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
-        
+
         self.data_retriever = None
         self.raw_data = None
         self.parser = None
@@ -25,6 +30,27 @@ class Pipeline:
         self.postparsed_data = None
         self.feature_extractor = None
         self.features_df = None
+
+        if exclusion_file:
+            self._merge_exclusions(exclusion_file)
+
+    def _merge_exclusions(self, exclusion_file_path: str):
+        """
+        Reads a text file of IDs (one per line) and adds them to the config's exclusion list.
+        """
+        if not os.path.exists(exclusion_file_path):
+            print(f"Warning: Exclusion file {exclusion_file_path} not found. Skipping.")
+            return
+
+        with open(exclusion_file_path, 'r') as f:
+            # Read lines, strip whitespace, ignore comments (#) and empty lines
+            new_ids = [line.split('#')[0].strip() for line in f]
+            new_ids = [str(x) for x in new_ids if x]  # Ensure they are strings
+
+        # Merge with existing config exclusions (tuples are immutable, so we create a new one)
+        current = list(self.config.MANUALLY_EXCLUDED_IDS)
+        self.config.MANUALLY_EXCLUDED_IDS = tuple(set(current + new_ids))
+        print(f"Added {len(new_ids)} IDs from blocklist to exclusion criteria.")
 
     def _get_now_str(self) -> str:
         """
@@ -42,17 +68,19 @@ class Pipeline:
             .format(f"{now.microsecond // 1000:0>3}")  # fills in millisecond info, 0-padded to three digits
         )
         return now_str
-    
+
     def _add_input_params_to_config(self):
         self.config.GAME_NAME = self.data_retriever._game_name
         self.config.GAME_ID = self.data_retriever._game_id
         if self._is_rm1:
             self.config.GAME_VERSION_IDS = self.data_retriever._game_version_ids
-            
+
     def _get_data_retriever(self) -> DataRetriever:
-        return (RedMetrics2DataRetriever(game_name=self._game_name, game_id=self._game_id, config=self.config) if not self._is_rm1 
-                else RedMetrics1DataRetriever(game_name=self._game_name, game_id=self._game_id, game_version_ids=self._game_version_ids, config=self.config))
-    
+        return (RedMetrics2DataRetriever(game_name=self._game_name, game_id=self._game_id,
+                                         config=self.config) if not self._is_rm1
+                else RedMetrics1DataRetriever(game_name=self._game_name, game_id=self._game_id,
+                                              game_version_ids=self._game_version_ids, config=self.config))
+
     def _retrieve_data(self, verbose):
         """
         This method contains the data retrieval process exclusively. This can be overridden by deriving classes.
@@ -60,7 +88,7 @@ class Pipeline:
         :return: raw data
         """
         return self.data_retriever.retrieve_data(verbose=verbose)
-    
+
     def retrieve_data(self, verbose=True):
         """
         Wraps raw data retrieval with extra necessary functionality.
@@ -75,7 +103,7 @@ class Pipeline:
 
         if verbose:
             print("Retrieving raw data...")
-            
+
         self.raw_data = self._retrieve_data(verbose=verbose)
         self.data_retriever.dump(verbose=verbose)
 
@@ -109,7 +137,7 @@ class Pipeline:
         :return: post-parsed data
         """
         self.postparser = PostParser(parsed_data=self.parsed_data,
-                                     config=self.config)
+                                     is_rm1=self._is_rm1, is_mri=self._is_mri, config=self.config)
         return self.postparser.postparse()
 
     def postparse(self, verbose):
@@ -128,7 +156,9 @@ class Pipeline:
         self.postparsed_data = self._postparse()
 
     def _extract_features(self, verbose):
-        self.feature_extractor = FeatureExtractor(preprocessed_data=self.postparsed_data, config=self.config)
+        self.feature_extractor = FeatureExtractor(preprocessed_data=self.postparsed_data,
+                                                  is_rm1=self._is_rm1, is_mri=self._is_mri,
+                                                  config=self.config)
         return self.feature_extractor.extract(verbose)
 
     def extract_features(self, verbose):
@@ -158,22 +188,27 @@ def main():
     import argparse
 
     argparser = argparse.ArgumentParser(description="Run CFG behavioral data pipeline")
-    argparser.add_argument("--game-name", help='The name of the name.')
+    argparser.add_argument("--game-name", help='The name of the game.')
     argparser.add_argument("--game-id", help='The id of the game.')
-    argparser.add_argument("--game-version-ids", nargs="+", help='A list of the game version ids that you want to retrieve.')
+    argparser.add_argument("--game-version-ids", nargs="+",
+                           help='A list of the game version ids that you want to retrieve.')
     argparser.add_argument("--config-path", help='The path to the yml file that contains the configuration')
     argparser.add_argument("-o", "--output", default=DEFAULT_FINAL_OUTPUT_FILENAME, dest="output_filename",
-                        help='Filename of output CSV')
+                           help='Filename of output CSV')
     argparser.add_argument("--rm1", action="store_true", help="Use RM1 data")
     argparser.add_argument("--mri", action="store_true", help="Load the MRI configuration defaults")
+    argparser.add_argument("--exclude-file", help="Path to text file with IDs to exclude")
     args = argparser.parse_args()
-    
-    config: Configuration | None = Configuration.from_yaml(yaml_path=args.config_path) if args.config_path else None
-    
+
+    config: Configuration | None = Configuration.from_yaml(
+        yaml_path=args.config_path) if args.config_path else None
+
     pl = Pipeline(game_name=args.game_name, game_id=args.game_id, game_version_ids=args.game_version_ids,
-                  is_rm1=args.rm1, is_mri=args.mri, output_filename=args.output_filename, config=config)
-    
+                  is_rm1=args.rm1, is_mri=args.mri, output_filename=args.output_filename,
+                  exclusion_file=args.exclude_file, config=config)
+
     pl.run_pipeline()
+
 
 if __name__ == '__main__':
     main()

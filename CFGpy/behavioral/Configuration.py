@@ -2,7 +2,8 @@ from dataclasses import dataclass, asdict
 
 from CFGpy._version import __version__ as CFGpy_version
 from CFGpy.behavioral._consts import (CONFIG_PACKAGE, CONFIG_FILENAME, RM2_CONFIG_FILENAME,
-                                      CFGPY_VERSION_ERROR, CONFIG_DUMP_EXTENSION, RM2_MRI_CONFIG_FILENAME)
+                                      CFGPY_VERSION_ERROR, CONFIG_DUMP_EXTENSION, RM2_MRI_CONFIG_FILENAME,
+                                      RM1_MRI_CONFIG_FILENAME)
 from CFGpy.behavioral._utils import server_coords_to_binary_shape
 from CFGpy.utils import binary_shape_to_id
 import yaml
@@ -17,20 +18,17 @@ class Configuration:
     @classmethod
     def default(cls, is_rm1: bool = False, is_mri: bool = False):
         if is_mri:
-            config_filename = RM2_MRI_CONFIG_FILENAME
-        elif is_rm1:
-            # Note: In your code, 'is_rm1=True' actually loads RM2_CONFIG_FILENAME.
-            # This variable naming is confusing but consistent with your existing logic.
-            config_filename = RM2_CONFIG_FILENAME
+            config_filename = RM2_MRI_CONFIG_FILENAME if not is_rm1 else RM1_MRI_CONFIG_FILENAME
+
         else:
-            config_filename = CONFIG_FILENAME
+            config_filename = RM2_CONFIG_FILENAME if not is_rm1 else CONFIG_FILENAME
 
         if sys.version_info[1] >= 9:
             config_path = ir.files(CONFIG_PACKAGE).joinpath(config_filename)
         else:
             config_path = ir.path(CONFIG_PACKAGE, config_filename)
         config = cls.from_yaml(config_path)
-        config.is_rm1 = is_rm1 or is_mri  # MRI config is based on RM2
+        config.is_rm1 = is_rm1
         return config
 
     @classmethod

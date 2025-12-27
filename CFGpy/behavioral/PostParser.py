@@ -24,9 +24,10 @@ def is_valid_transition(shape1: int, shape2: int) -> bool:
 
 
 class PostParser:
-    def __init__(self, *, parsed_data, is_rm1: bool = False, config: Configuration = None):
+    def __init__(self, *, parsed_data, is_rm1: bool = False,  is_mri: bool = False,
+                 config: Configuration = None):
         self.all_players_data = parsed_data
-        self.config = config or Configuration.default(is_rm1=is_rm1)
+        self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
 
     @classmethod
     def from_json(cls, path: str, config=None):
@@ -37,6 +38,7 @@ class PostParser:
         if self.config.SEGMENTATION_ALGORITHM == "MRI":
             self.handle_empty_moves()
         self.add_explore_exploit()
+        # TODO: Remove bad games?
         return self.all_players_data
 
     def convert_shape_ids(self):

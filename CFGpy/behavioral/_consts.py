@@ -9,6 +9,7 @@ Please do not change this file unless you're absolutely sure you know what you'r
 CONFIG_PACKAGE = "CFGpy.behavioral"
 CONFIG_FILENAME = "default_config.yml"
 RM2_CONFIG_FILENAME = "default_rm2_config.yml"
+RM1_MRI_CONFIG_FILENAME = "default_rm1_mri_config.yml"
 RM2_MRI_CONFIG_FILENAME = "default_rm2_mri_config.yml"
 CFGPY_VERSION_ERROR = "Configuration file requires CFGpy version {}. Installed version is {}"
 CONFIG_DUMP_EXTENSION = ".yml"
