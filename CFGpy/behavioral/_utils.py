@@ -400,7 +400,7 @@ def robust_median(data):
     #  mask isn't being used in the original code in aviv branch,
     #  but keeping it here in case it's needed later
     mask = ~is_outlier(data, median, mad)
-    print(data)
+    # print(data)
     return median, mad
 
 

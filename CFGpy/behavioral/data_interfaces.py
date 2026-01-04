@@ -267,7 +267,11 @@ class PostparsedDataset(ParsedDataset):
                  if is_semantic_connection(c1, c2, self.config.MIN_OVERLAP_FOR_SEMANTIC_CONNECTION)]
         semantic_network.add_edges_from(edges)
         connected_components = nx.connected_components(semantic_network)
-        GC = max(connected_components, key=len)
+        # [FIX] Handle empty graphs (players with no valid moves)
+        try:
+            GC = max(connected_components, key=len)
+        except ValueError:
+            return []
         return GC
 
     def get_stats(self):

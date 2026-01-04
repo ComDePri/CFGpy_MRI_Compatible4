@@ -107,7 +107,7 @@ class PostParser:
                                # if a player clicked "save" at least once during the grouped steps,
                                # take the earliest save time
                                # else, keep NaN
-                               shape_save_time_idx: np.nanmin,
+                               shape_save_time_idx: "min",
                                shape_last_move_time_idx: lambda x: x.iloc[-1]})
                          .drop(columns="group_id"))
             # fixes possible column reordering caused by agg()

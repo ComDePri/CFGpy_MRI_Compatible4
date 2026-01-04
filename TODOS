@@ -1,0 +1,6 @@
+1) make the whole program except URL as argument  // DONE
+2) find out how and if to implement UrlToCSV inside RedMatrics1DataRetriever class // DONE
+3) Define behaviour when the RedMatrics1DataRetriever doesn't get the expected inpput // DONE
+4) Understand why some of the games that were included by Roey's output are now excluded in mine
+5) Test the Exclude games file functionality (might not work for RM1 because the ID column is in the
+playerCustomData column rather than in playerId column)

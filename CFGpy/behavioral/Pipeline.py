@@ -9,15 +9,17 @@ import os
 class Pipeline:
 
     def __init__(self, game_name: str | None = None, game_id: str | None = None,
-                 game_version_ids: list[str] | None = None, is_rm1: bool = False, is_mri: bool = False,
+                 is_rm1: bool = False, is_mri: bool = False,
                  output_filename=DEFAULT_FINAL_OUTPUT_FILENAME, exclusion_file: str | None = None,
-                 config: Configuration = None):
+                 config: Configuration = None, input_url: str | None = None,
+                 game_version_ids: list[str] | None = None):
 
+        self._game_version_ids = game_version_ids
         self._game_name = game_name
         self._game_id: str = game_id
-        self._game_version_ids = game_version_ids
         self._is_rm1 = is_rm1
         self._is_mri = is_mri
+        self._input_url = input_url
 
         self.output_filename = output_filename
         self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
@@ -54,11 +56,15 @@ class Pipeline:
 
     def _get_now_str(self) -> str:
         """
-        Returns a string representation of the current time, formatted like server's time (given in self.config).
+        Returns a string representation of the current time,
+         formatted like server's time (given in self.config).
 
-        Python's datetime only allows specifying sub-second precision in microseconds (6 decimal places), but RedMetrics
-        URL only accept milliseconds (3 decimal places). Therefore, if the server's time format contains microseconds,
-        we manually replace that with milliseconds, to accommodate RedMetrics.
+        Python's datetime only allows specifying sub-second
+         precision in microseconds (6 decimal places), but RedMetrics
+        URL only accept milliseconds (3 decimal places).
+         Therefore, if the server's time format contains microseconds,
+        we manually replace that with milliseconds,
+         to accommodate RedMetrics.
         """
         now = datetime.now(timezone.utc)
         now_str = (
@@ -72,18 +78,25 @@ class Pipeline:
     def _add_input_params_to_config(self):
         self.config.GAME_NAME = self.data_retriever._game_name
         self.config.GAME_ID = self.data_retriever._game_id
-        if self._is_rm1:
-            self.config.GAME_VERSION_IDS = self.data_retriever._game_version_ids
 
     def _get_data_retriever(self) -> DataRetriever:
-        return (RedMetrics2DataRetriever(game_name=self._game_name, game_id=self._game_id,
-                                         config=self.config) if not self._is_rm1
-                else RedMetrics1DataRetriever(game_name=self._game_name, game_id=self._game_id,
-                                              game_version_ids=self._game_version_ids, config=self.config))
+        if not self._is_rm1:
+            return (RedMetrics2DataRetriever(game_name=self._game_name,
+                                             game_id=self._game_id, config=self.config))
+
+        return RedMetrics1DataRetriever(
+            game_name=self._game_name,  # CLI args (optional)
+            game_id=self._game_id,  # CLI args (optional)
+            config=self.config,
+            input_url=self._input_url,  # Pass the URL directly!
+            # We still pass these to support legacy behavior if needed,
+            # but we don't need to unpack **retriever_args anymore.
+            game_version_ids=self._game_version_ids)
 
     def _retrieve_data(self, verbose):
         """
-        This method contains the data retrieval process exclusively. This can be overridden by deriving classes.
+        This method contains the data retrieval process exclusively.
+         This can be overridden by deriving classes.
         :param verbose: whether to print info during the data retrieval process
         :return: raw data
         """
@@ -186,7 +199,6 @@ class Pipeline:
 
 def main():
     import argparse
-
     argparser = argparse.ArgumentParser(description="Run CFG behavioral data pipeline")
     argparser.add_argument("--game-name", help='The name of the game.')
     argparser.add_argument("--game-id", help='The id of the game.')
@@ -198,14 +210,17 @@ def main():
     argparser.add_argument("--rm1", action="store_true", help="Use RM1 data")
     argparser.add_argument("--mri", action="store_true", help="Load the MRI configuration defaults")
     argparser.add_argument("--exclude-file", help="Path to text file with IDs to exclude")
+    argparser.add_argument("--input-data-url", help="The RedMetrics data URL to download data from.")
+
     args = argparser.parse_args()
 
     config: Configuration | None = Configuration.from_yaml(
         yaml_path=args.config_path) if args.config_path else None
 
-    pl = Pipeline(game_name=args.game_name, game_id=args.game_id, game_version_ids=args.game_version_ids,
+    pl = Pipeline(game_name=args.game_name, game_id=args.game_id,
                   is_rm1=args.rm1, is_mri=args.mri, output_filename=args.output_filename,
-                  exclusion_file=args.exclude_file, config=config)
+                  exclusion_file=args.exclude_file, config=config, input_url=args.input_data_url,
+                  game_version_ids=args.game_version_ids)
 
     pl.run_pipeline()
 

@@ -97,7 +97,7 @@ class Parser:
 
         # Bug no.2 sometimes the endPosition and shape columns switch places
         switched_column_indices = np.flatnonzero(
-            data['customData.endPosition'].apply(lambda x: len(json.loads(x)) == 10 if type(x) is str else False))
+            data['customData.endPosition'].apply(lambda x: len(json.loads(x)) == 10 if (isinstance(x, str) and x.strip()) else False))
         data.loc[switched_column_indices, 'customData.shape'] = data.loc[
             switched_column_indices, 'customData.endPosition']
         data['customData.shape'] = data['customData.shape'].apply(
