@@ -4,6 +4,8 @@ from io import StringIO
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
+
 
 import pandas as pd
 import requests
@@ -76,7 +78,117 @@ class RedMetrics1DataRetriever(DataRetriever):
         self._validate_config()
         self._load_csv_files()
 
+    import os
+    import pandas as pd
+    import requests
+    from io import StringIO
+    from urllib.parse import urlparse, parse_qs
+    from datetime import datetime
+
     def _download_and_cache(self, url: str, target_directory: str = "downloaded_data_cache") -> dict:
+        """
+        Downloads data in 30-day chunks to prevent server timeouts and synthesizes
+        necessary CSV files (events, games, players, versions).
+        """
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        os.makedirs(target_directory, exist_ok=True)
+        events_path = os.path.join(target_directory, "events.csv")
+
+        # 1. Determine Time Range for Chunking
+        after_str = query_params.get('after', ["2021-01-01T00:00:00.000Z"])[0]
+        current_after_dt = pd.to_datetime(after_str.replace('Z', ''))
+        end_dt = datetime.now()
+
+        base_url_no_params = url.split('?')[0]
+        game_id_from_url = query_params.get('game', [None])[0]
+
+        print(f"Starting chunked download from {after_str} to present...")
+        chunk_dfs = []
+
+        # 2. The Chunking Loop (Handles timeouts)
+        while current_after_dt < end_dt:
+            next_before_dt = current_after_dt + pd.Timedelta(days=30)
+            if next_before_dt > end_dt:
+                next_before_dt = end_dt
+
+            after_val = current_after_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            before_val = next_before_dt.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+            chunk_url = f"{base_url_no_params}?game={game_id_from_url}&entityType=event&after={after_val}&before={before_val}"
+
+            try:
+                # Using a long read timeout for heavy CSV generation on the server
+                response = requests.get(chunk_url, timeout=(15, 300))
+                response.raise_for_status()
+
+                chunk_df = pd.read_csv(StringIO(response.text), on_bad_lines='skip')
+                if not chunk_df.empty:
+                    print(f"  [OK]    {after_val[:10]} to {before_val[:10]} ({len(chunk_df)} rows)")
+                    chunk_dfs.append(chunk_df)
+                else:
+                    print(f"  [EMPTY] {after_val[:10]} to {before_val[:10]}")
+            except Exception as e:
+                print(f"  [FAILED] Chunk {after_val[:10]} failed: {e}")
+
+            current_after_dt = next_before_dt
+
+        # 3. Combine and Save events.csv
+        if not chunk_dfs:
+            raise ValueError("Download failed: No data retrieved from any chunk.")
+
+        df_events = pd.concat(chunk_dfs, ignore_index=True).drop_duplicates()
+        df_events.to_csv(events_path, index=False)
+
+        # 4. Extract Game ID and Name (Mirroring your original logic)
+        game_id = game_id_from_url
+        if not game_id and 'game_id' in df_events.columns and not df_events.empty:
+            game_id = str(df_events['game_id'].iloc[0])
+
+        game_name = f"Game_{game_id}" if game_id else "Unknown_Game"
+
+        # 5. Synthesize games.csv
+        pd.DataFrame([{'id': game_id, 'name': game_name}]).to_csv(
+            os.path.join(target_directory, "games.csv"), index=False
+        )
+
+        # 6. Synthesize players.csv (Crucial to fix your FileNotFoundError)
+        user_col = next((col for col in ['playerId', 'player', 'user_id', 'player_id', 'user']
+                         if col in df_events.columns), None)
+        if user_col:
+            unique_players = df_events[user_col].unique()
+            df_players = pd.DataFrame({'id': unique_players})
+            df_players['name'] = df_players['id'].apply(lambda x: f"Player_{x}")
+            df_players.to_csv(os.path.join(target_directory, "players.csv"), index=False)
+        else:
+            # Create empty but existing file if no user column found
+            pd.DataFrame(columns=['id', 'name']).to_csv(
+                os.path.join(target_directory, "players.csv"), index=False
+            )
+
+        # 7. Synthesize game_versions.csv (For Pipeline Compatibility)
+        version_col = next((col for col in ['version', 'gameVersion', 'game_version']
+                            if col in df_events.columns), None)
+
+        if version_col:
+            unique_versions = df_events[version_col].unique()
+            df_versions = pd.DataFrame({'id': unique_versions})
+        else:
+            df_versions = pd.DataFrame({'id': ['1.0']})  # Default version
+
+        df_versions['game_id'] = game_id
+        df_versions.to_csv(os.path.join(target_directory, "game_versions.csv"), index=False)
+
+        print(f"Successfully cached {len(df_events)} events in '{target_directory}'")
+
+        return {
+            "game_name": game_name,
+            "game_id": game_id,
+            "csv_directory": target_directory
+        }
+
+
+    def _download_and_cache_BEFORE_ROEYS_CHANEGS_TO_HANDLE_RM1_TIMEOUT(self, url: str, target_directory: str = "downloaded_data_cache") -> dict:
         """
         Downloads content from URL and synthesizes necessary CSV files (events, games, players, versions).
         Returns dictionary with extracted game_id, game_name, and the directory path.

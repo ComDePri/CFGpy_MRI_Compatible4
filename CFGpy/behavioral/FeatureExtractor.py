@@ -51,10 +51,115 @@ class FeatureExtractor:
     def from_json(cls, path: str, config=Configuration.default()):
         return cls(preprocessed_data=load_json(path), config=config)
 
+    def _drop_nonfirst_games_from_list(self):
+        """
+        Keeps the session with the best data quality for each unique Subject ID.
+        Prioritizes Gallery Count first, then Move Count.
+        """
+        best_games = {}
+
+        for player in self.input_data.players_data:
+            # Identity: Fallback between .id and .player_id
+            pid = getattr(player, 'id', getattr(player, 'player_id', None))
+            subject_id = str(pid).strip()
+
+            # Quality Score: Prioritize Galleries, then Moves
+            g_score = len(getattr(player, 'galleries', []))
+            m_score = len(getattr(player, 'delta_move_times', []))
+            current_quality = (g_score, m_score)
+
+            if subject_id not in best_games:
+                best_games[subject_id] = (player, current_quality)
+            else:
+                _, existing_quality = best_games[subject_id]
+                # Tuple comparison: (10, 100) > (0, 200) -> Correctly picks the game with galleries
+                if current_quality > existing_quality:
+                    best_games[subject_id] = (player, current_quality)
+
+        self.input_data.players_data = [val[0] for val in best_games.values()]
+        print(f"Filter complete: {len(self.input_data.players_data)} unique subjects remain.")
+
     def extract(self, verbose=False):
+        # 1. Sync ID access (MRI JSON uses 'id', Standard uses 'player_id')
+        for p in self.input_data.players_data:
+            if not hasattr(p, 'id') and hasattr(p, 'player_id'): p.id = p.player_id
+            if not hasattr(p, 'player_id') and hasattr(p, 'id'): p.player_id = p.id
+
+        # 2. Selection & Initial Audit
+        self._drop_nonfirst_games_from_list()
+
+        # 3. Absolute Pass
         self.all_absolute_features = self._extract_absolute_features(verbose)
         self.output_df = self.all_absolute_features.copy()
-        self._drop_nonfirst_games()
+
+        # 4. Vanilla Relative
+        vanilla_rel = self._extract_relative_features(get_vanilla_stats(), verbose=verbose)
+        self.output_df = self.output_df.merge(vanilla_rel, on=FEATURES_ID_KEY)
+
+        # 5. Pruning & Alignment (The Gemini Sync Fix)
+        self._apply_soft_filters()
+        surviving_ids = set(self.output_df[FEATURES_ID_KEY].astype(str))
+
+        # Ensure the list of objects matches the survivors in the table
+        self.input_data.players_data = [p for p in self.input_data.players_data if str(p.id) in surviving_ids]
+
+        # Enforce
+        # Ensure the objects list and the table are 100% identical in size and ID
+        surviving_ids = self.output_df[FEATURES_ID_KEY].astype(str).tolist()
+        self.input_data.players_data = [
+            p for p in self.input_data.players_data if str(p.id) in surviving_ids
+        ]
+
+        print(f"[SYNC] Objects: {len(self.input_data.players_data)} | Table: {len(self.output_df)}")
+
+        # 6. Sample-based Relative
+        stats = self.input_data.get_stats()
+        sample_rel = self._extract_relative_features(stats, verbose=verbose, label=SAMPLE_RELATIVE_FEATURES_LABEL)
+
+        # Final Merge (Force string IDs for safety)
+        sample_rel[FEATURES_ID_KEY] = sample_rel[FEATURES_ID_KEY].astype(str)
+        self.output_df[FEATURES_ID_KEY] = self.output_df[FEATURES_ID_KEY].astype(str)
+        self.output_df = self.output_df.merge(sample_rel, on=FEATURES_ID_KEY, how="left")
+
+        print("\n" + "=" * 50)
+        print("FINAL SAMPLE-RELATIVE BIOPSY")
+        print("=" * 50)
+
+        # 1. Check if the Sample Results Table is actually empty
+        print(f"Sample Results Table Length: {len(sample_rel)}")
+
+        # 2. Check the ID types in both tables
+        table_id_sample = self.output_df[FEATURES_ID_KEY].iloc[0]
+        result_id_sample = sample_rel[FEATURES_ID_KEY].iloc[0]
+        print(f"Table ID Type: {type(table_id_sample)} (Value: {table_id_sample})")
+        print(f"Result ID Type: {type(result_id_sample)} (Value: {result_id_sample})")
+
+        # 3. Check the "Overlap" - Do any IDs actually match?
+        overlap = set(self.output_df[FEATURES_ID_KEY].astype(str)) & set(sample_rel[FEATURES_ID_KEY].astype(str))
+        print(f"ID Overlap Count: {len(overlap)} / {len(self.output_df)}")
+
+        # 4. Check the "Stats" - Is the probability map actually empty?
+        # stats is a tuple: (steps_not_uniquely_covered, step_counter, ...)
+        _, step_counter, _, gallery_counter, _ = stats
+        print(f"Total Unique Steps in Sample Map: {len(step_counter)}")
+        print(f"Total Unique Galleries in Sample Map: {len(gallery_counter)}")
+
+        if len(step_counter) == 0:
+            print("[CRITICAL] The Sample Map is EMPTY. The extractor isn't seeing any moves!")
+        print("=" * 50 + "\n")
+
+        # Check a few actual values from the result table before the merge
+        valid_values = sample_rel.iloc[:, 1:].notna().sum().sum()
+        print(f"Total non-NaN values in Sample Results: {valid_values}")
+        print(f"Sample Results Columns: {sample_rel.columns.tolist()}")
+
+        return self.output_df
+
+    def extract_BEFORE_ROEYS_CHANGES(self, verbose=False):
+        self._drop_nonfirst_games() # TODO: ROEY MOVED IT HERE BC I THINK IT MAKES MORE SENSE BEFORE CALCULATING ANYTHING
+        self.all_absolute_features = self._extract_absolute_features(verbose)
+        self.output_df = self.all_absolute_features.copy()
+        #self._drop_nonfirst_games()
         vanilla_relative_features = self._extract_relative_features(get_vanilla_stats(), verbose=verbose)
         self.output_df = self.output_df.merge(vanilla_relative_features, on=FEATURES_ID_KEY)
         self._apply_soft_filters()
@@ -81,10 +186,36 @@ class FeatureExtractor:
     def get_all_absolute_features(self):
         return self.all_absolute_features
 
+    def _drop_nonfirst_games_ROEY_IS_TRYING_THIS_FIX_FROM_GEMINI(self, min_duration_seconds=600):
+        """
+        Keeps the 'best' valid game for each player.
+        Prioritizes the first game that meets the duration threshold.
+        """
+        # 1. Update the DataFrame: Sort by time, but prioritize games that meet the threshold
+        # We create a temporary 'is_valid' helper for sorting
+        self.output_df['is_long_enough'] = self.output_df[GAME_DURATION_KEY] >= min_duration_seconds
+
+        self.output_df = (self.output_df
+                          .sort_values(by=['is_long_enough', FEATURES_START_TIME_KEY],
+                                       ascending=[False, True])  # Valid games first, then by time
+                          .drop_duplicates(subset=[FEATURES_ID_KEY], keep="first")
+                          .drop(columns=['is_long_enough'])
+                          .reset_index(drop=True))
+
+        # 2. Sync the Input Data (the objects)
+        # We must tell input_data to keep ONLY the indices that survived in output_df
+        surviving_ids = set(self.output_df[FEATURES_ID_KEY].unique())
+
+        # This is where the 225 vs 165 usually happens.
+        # Ensure the underlying objects are pruned to match the Table EXACTLY.
+        self.input_data.keep_only_indices(self.output_df[FEATURES_INDEX_KEY].tolist())
+
+    #def _drop_nonfirst_games_BEFORE_ROEY_ADDED_A_TIMING_TEST(self):
     def _drop_nonfirst_games(self):
         """
         Keeps only the first game from each player. Allows functions downstream to assume unique IDs.
         """
+        # TODO: this is the versino that Roey removed in favor of the one above, which leeps non first games if they were long enough (more than 10 minutes)
         self.input_data.drop_non_first_games()
         self.output_df = (self.output_df.
                           sort_values(by=[FEATURES_START_TIME_KEY], ascending=True).
@@ -98,10 +229,24 @@ class FeatureExtractor:
         for filter_getter in (self._get_absolute_filters, self._get_sample_relative_filters):
             masks, reasons = filter_getter()
             self._update_exclusion_info(masks, reasons)
+
+            # Combine masks into a single boolean array
             is_excluded = reduce(np.logical_or, masks)
 
-            self.input_data.filter(~is_excluded)
+            # 1. Capture surviving indices BEFORE we filter output_df
+            # This ensures we know exactly which Player Objects in players_data
+            # correspond to the 'False' values in is_excluded.
+            surviving_indices = self.output_df.index[~is_excluded].tolist()
+
+            # 2. Filter the Table (Standard original logic)
             self.output_df = self.output_df.loc[~is_excluded].reset_index(drop=True)
+
+            # 3. Filter the Objects (The manual sync that prevents the IndexingError)
+            # This replaces 'self.input_data.filter(~is_excluded)'
+            self.input_data.players_data = [self.input_data.players_data[i] for i in surviving_indices]
+
+        print(f"Soft filters complete. Final survivors: {len(self.output_df)}")
+
 
     def _get_absolute_filters(self):
         """
@@ -160,34 +305,46 @@ class FeatureExtractor:
 
         absolute_features = []
         for player_data in iterator:
-            # pre-calculations
+            # IDENTITY FIX: Ensure ID is accessible
+            p_id = getattr(player_data, 'id', getattr(player_data, 'player_id', "UNKNOWN"))
+
+            # 1. Pre-calculations
             explore_lengths = [end - start for start, end in player_data.explore_slices]
             exploit_lengths = [end - start for start, end in player_data.exploit_slices]
             is_gallery = player_data.get_gallery_mask()
-
-            # TODO: Added from the aviv repo, to handle edge case of no galleries
             n_galleries = sum(is_gallery)
+
+            # 2. NO-SKIP LOGIC: Instead of 'continue', we handle 0 galleries gracefully
             if n_galleries == 0:
-                print(f"Player {player_data.id} has no galleries, skipping...")
+                print(f"[DEBUG] Subject {p_id} has 0 galleries. Providing NaN absolute features.")
+                # We append a placeholder so the merge indices stay aligned
+                absolute_features.append({FEATURES_ID_KEY: p_id})
+                n_galleries_in_explore.append(np.nan)
+                total_explore_times.append(np.nan)
+                total_exploit_times.append(np.nan)
+                total_explore_lengths.append(np.nan)
+                total_exploit_lengths.append(np.nan)
                 continue
+
             is_explore = player_data.get_explore_mask()
 
-            # data collection for later vectorized operations
+            # Data collection for later vectorized operations
             n_galleries_in_explore.append(sum(is_gallery & is_explore))
             total_explore_times.append(player_data.total_explore_time())
             total_exploit_times.append(player_data.total_exploit_time())
             total_explore_lengths.append(sum(explore_lengths))
             total_exploit_lengths.append(sum(exploit_lengths))
-            # the values that are calculated only in MRI mode
-            # TODO: added, didn't exist in the original MeasureCalculator in "aviv" repo
+
+            # MRI-specific robust metrics
             robust_median = getattr(player_data, ROBUST_MEDIAN_PACE_KEY, np.nan)
             robust_threshold = getattr(player_data, ROBUST_THRESHOLD_KEY, np.nan)
 
-            # player-wise calculations
+            # Player-wise calculations
             explore_efficiency, exploit_efficiency = player_data.get_efficiency()
             absolute_features.append({
-                FEATURES_ID_KEY: player_data.id,
-                FEATURES_START_TIME_KEY: datetime.fromtimestamp(player_data.start_time).isoformat(),
+                FEATURES_ID_KEY: p_id,
+                FEATURES_START_TIME_KEY: datetime.fromtimestamp(player_data.start_time).isoformat() if hasattr(
+                    player_data, 'start_time') else None,
                 GAME_DURATION_KEY: player_data.get_last_action_time(),
                 N_MOVES_KEY: len(player_data),
                 N_GALLERIES_KEY: n_galleries,
@@ -195,21 +352,26 @@ class FeatureExtractor:
                 N_CLUSTERS_KEY: len(player_data.exploit_slices),
                 EXPLORE_EFFICIENCY_KEY: explore_efficiency,
                 EXPLOIT_EFFICIENCY_KEY: exploit_efficiency,
-                MEDIAN_EXPLORE_LENGTH_KEY: np.median(explore_lengths),
-                MEDIAN_EXPLOIT_LENGTH_KEY: np.median(exploit_lengths),
+                MEDIAN_EXPLORE_LENGTH_KEY: np.median(explore_lengths) if explore_lengths else np.nan,
+                MEDIAN_EXPLOIT_LENGTH_KEY: np.median(exploit_lengths) if exploit_lengths else np.nan,
                 LONGEST_PAUSE_KEY: player_data.get_max_pause_duration(),
                 ROBUST_MEDIAN_PACE_KEY: robust_median,
                 ROBUST_THRESHOLD_KEY: robust_threshold,
             })
 
-        # vectorized operations
+        # Vectorized operations
         features_df = pd.DataFrame(absolute_features)
-        features_df[AVERAGE_SPEED_KEY] = features_df[N_MOVES_KEY] / features_df[GAME_DURATION_KEY]
-        features_df[FRACTION_GALLERY_IN_EXPLORE_KEY] = pd.Series(n_galleries_in_explore) / features_df[N_GALLERIES_KEY]
-        features_df[FRACTION_TIME_IN_EXPLORE_KEY] = pd.Series(total_explore_times) / features_df[GAME_DURATION_KEY]
-        features_df[EFFICIENCY_RATIO_KEY] = features_df[EXPLORE_EFFICIENCY_KEY] / features_df[EXPLOIT_EFFICIENCY_KEY]
-        features_df[EXPLORE_SPEED_KEY] = pd.Series(total_explore_lengths) / pd.Series(total_explore_times)
-        features_df[EXPLOIT_SPEED_KEY] = pd.Series(total_exploit_lengths) / pd.Series(total_exploit_times)
+
+        # Safe division to prevent crashes on empty subjects
+        with np.errstate(divide='ignore', invalid='ignore'):
+            features_df[AVERAGE_SPEED_KEY] = features_df[N_MOVES_KEY] / features_df[GAME_DURATION_KEY]
+            features_df[FRACTION_GALLERY_IN_EXPLORE_KEY] = pd.Series(n_galleries_in_explore) / features_df[
+                N_GALLERIES_KEY]
+            features_df[FRACTION_TIME_IN_EXPLORE_KEY] = pd.Series(total_explore_times) / features_df[GAME_DURATION_KEY]
+            features_df[EFFICIENCY_RATIO_KEY] = features_df[EXPLORE_EFFICIENCY_KEY] / features_df[
+                EXPLOIT_EFFICIENCY_KEY]
+            features_df[EXPLORE_SPEED_KEY] = pd.Series(total_explore_lengths) / pd.Series(total_explore_times)
+            features_df[EXPLOIT_SPEED_KEY] = pd.Series(total_exploit_lengths) / pd.Series(total_exploit_times)
 
         return features_df
 
@@ -229,34 +391,63 @@ class FeatureExtractor:
 
         relative_features = []
         for player_data in iterator:
-            steps = player_data.get_steps()
-            step_orig = [step_orig_map[step] for step in steps]
-            gallery_ids = player_data.get_gallery_ids()
-            gallery_orig = np.array([gallery_orig_map[shape_id] for shape_id in gallery_ids])
-            is_gallery = player_data.get_gallery_mask()
-            is_explore_given_gallery = player_data.get_explore_mask()[is_gallery]
-            is_exploit_given_gallery = ~is_explore_given_gallery
-            exploit_clusters = player_data.get_exploit_clusters()
-            n_clusters_in_GC = sum([self.is_cluster_in_GC(cluster, GC) for cluster in exploit_clusters])
-            frac_clusters_in_GC = (n_clusters_in_GC / len(player_data.exploit_slices)
-                                   if player_data.exploit_slices else None)
+            p_id = getattr(player_data, 'id', getattr(player_data, 'player_id', "UNKNOWN"))
 
-            relative_features.append({
-                FEATURES_ID_KEY: player_data.id,
-                f"{STEP_ORIG_KEY}{label_ext}": np.mean(step_orig),
-                f"{FRACTION_STEPS_UNIQUELY_COVERED_KEY}{label_ext}":
-                    _get_frac_uniquely_covered(steps, steps_not_uniquely_covered),
-                f"{GALLERY_ORIG_KEY}{label_ext}": np.mean(gallery_orig),
-                f"{GALLERY_ORIG_EXPLORE_KEY}{label_ext}": np.mean(gallery_orig[is_explore_given_gallery]),
-                f"{GALLERY_ORIG_EXPLOIT_KEY}{label_ext}": np.mean(gallery_orig[is_exploit_given_gallery]),
-                f"{FRACTION_GALLERIES_UNIQUELY_COVERED_KEY}{label_ext}":
-                    _get_frac_uniquely_covered(gallery_ids, galleries_not_uniquely_covered),
-                f"{FRACTION_GALLERIES_UNIQUELY_COVERED_EXPLORE_KEY}{label_ext}":
-                    _get_frac_uniquely_covered(gallery_ids[is_explore_given_gallery], galleries_not_uniquely_covered),
-                f"{FRACTION_GALLERIES_UNIQUELY_COVERED_EXPLOIT_KEY}{label_ext}":
-                    _get_frac_uniquely_covered(gallery_ids[is_exploit_given_gallery], galleries_not_uniquely_covered),
-                f"{N_CLUSTERS_IN_GC_KEY}{label_ext}": n_clusters_in_GC,
-                f"{FRACTION_CLUSTERS_IN_GC_KEY}{label_ext}": frac_clusters_in_GC,
-            })
+            # Initialize empty results for this player
+            p_results = {FEATURES_ID_KEY: p_id}
+
+            try:
+                # 1. Step Logic
+                steps = player_data.get_steps()
+                step_orig = [step_orig_map[step] for step in steps]
+                p_results[f"{STEP_ORIG_KEY}{label_ext}"] = np.mean(step_orig) if step_orig else np.nan
+                p_results[f"{FRACTION_STEPS_UNIQUELY_COVERED_KEY}{label_ext}"] = _get_frac_uniquely_covered(steps,
+                                                                                                            steps_not_uniquely_covered)
+
+                # 2. Gallery Logic (MRI and Standard)
+                gallery_ids = player_data.get_gallery_ids()
+                gallery_orig = np.array([gallery_orig_map[shape_id] for shape_id in gallery_ids])
+
+                is_gallery = player_data.get_gallery_mask()
+                explore_mask = player_data.get_explore_mask()
+
+                # Check if we have galleries to calculate gallery-relative stats
+                if len(gallery_ids) > 0:
+                    is_explore_given_gallery = explore_mask[is_gallery]
+                    is_exploit_given_gallery = ~is_explore_given_gallery
+
+                    p_results[f"{GALLERY_ORIG_KEY}{label_ext}"] = np.mean(gallery_orig)
+
+                    # Safe Slice Means
+                    p_results[f"{GALLERY_ORIG_EXPLORE_KEY}{label_ext}"] = np.mean(
+                        gallery_orig[is_explore_given_gallery]) if any(is_explore_given_gallery) else np.nan
+                    p_results[f"{GALLERY_ORIG_EXPLOIT_KEY}{label_ext}"] = np.mean(
+                        gallery_orig[is_exploit_given_gallery]) if any(is_exploit_given_gallery) else np.nan
+
+                    # Uniqueness
+                    p_results[f"{FRACTION_GALLERIES_UNIQUELY_COVERED_KEY}{label_ext}"] = _get_frac_uniquely_covered(
+                        gallery_ids, galleries_not_uniquely_covered)
+                    p_results[
+                        f"{FRACTION_GALLERIES_UNIQUELY_COVERED_EXPLORE_KEY}{label_ext}"] = _get_frac_uniquely_covered(
+                        gallery_ids[is_explore_given_gallery], galleries_not_uniquely_covered) if any(
+                        is_explore_given_gallery) else np.nan
+                    p_results[
+                        f"{FRACTION_GALLERIES_UNIQUELY_COVERED_EXPLOIT_KEY}{label_ext}"] = _get_frac_uniquely_covered(
+                        gallery_ids[is_exploit_given_gallery], galleries_not_uniquely_covered) if any(
+                        is_exploit_given_gallery) else np.nan
+
+                # 3. Cluster Logic
+                exploit_clusters = player_data.get_exploit_clusters()
+                n_clusters_in_GC = sum([self.is_cluster_in_GC(cluster, GC) for cluster in exploit_clusters])
+
+                p_results[f"{N_CLUSTERS_IN_GC_KEY}{label_ext}"] = n_clusters_in_GC
+                p_results[f"{FRACTION_CLUSTERS_IN_GC_KEY}{label_ext}"] = (n_clusters_in_GC / len(
+                    player_data.exploit_slices)) if player_data.exploit_slices else np.nan
+
+            except Exception as e:
+                print(f"[ERROR] Failed relative extraction for {p_id}: {e}")
+                # We still append the dict with only the ID to keep the merge healthy
+
+            relative_features.append(p_results)
 
         return pd.DataFrame(relative_features)

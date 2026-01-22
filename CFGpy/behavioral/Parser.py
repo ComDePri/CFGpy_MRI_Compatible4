@@ -61,30 +61,27 @@ class Parser:
         self.config.to_yaml(path)
 
     def _prepare_data(self):
-        data = self.raw_data
-        data = self.patchfix_csv_data(data)
-        data[self.config.PARSER_JSON_COLUMN] = data[self.config.PARSER_JSON_COLUMN] = data[self.config.PARSER_JSON_COLUMN].apply(
-            lambda x: json.loads(x) if isinstance(x, str) else x
-        )
-        all_json_keys = self.get_all_json_keys_from_csv_data(data)
-        for key in all_json_keys:
-            # Take the json inside the csv file and turn them into columns
-            data[key] = data[self.config.PARSER_JSON_COLUMN].apply(lambda json_dict: json_dict.get(key))
+        data = self.raw_data.copy()
 
-        data[self.config.SHAPE_MOVE_COLUMN] = data[self.config.SHAPE_MOVE_COLUMN].apply(
-            lambda val: val if isinstance(val, list) 
-            else json.loads(val) if isinstance(val, str) 
-            else np.nan
-            )
-        data[self.config.SHAPE_SAVE_COLUMN] = data[self.config.SHAPE_SAVE_COLUMN].apply(
-            lambda val: val if isinstance(val, list) 
-            else json.loads(val) if isinstance(val, str) 
-            else np.nan
-            )
+        # 1. Standardize column names based on config
+        # If the CSV has 'type', map it to what the parser expects
+        if self.config.EVENT_TYPE in data.columns and self.config.EVENT_TYPE != "eventType":
+            data['eventType'] = data[self.config.EVENT_TYPE]
 
+        # 2. Backfill IDs (This is where Subject 057b is fixed)
         data = self.merge_id_columns(data)
-        data[self.config.PARSER_TIME_COLUMN] = pd.to_datetime(data[self.config.PARSER_TIME_COLUMN],
-                                                              format=self.config.SERVER_DATE_FORMAT)
+
+        # 3. Expand JSON (MRI uses playerCustomData)
+        json_col = self.config.PARSER_JSON_COLUMN
+        if json_col in data.columns:
+            data[json_col] = data[json_col].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
+            # Flatten keys (like userProvidedId) into top-level columns
+            all_keys = self.get_all_json_keys_from_csv_data(data)
+            for key in all_keys:
+                data[key] = data[json_col].apply(lambda d: d.get(key) if isinstance(d, dict) else np.nan)
+
+        # 4. Final cleaning and sorting
+        data[self.config.PARSER_TIME_COLUMN] = pd.to_datetime(data[self.config.PARSER_TIME_COLUMN], errors='coerce')
         data = data.sort_values(by=self.config.PARSER_TIME_COLUMN).reset_index(drop=True)
 
         return data
@@ -116,11 +113,25 @@ class Parser:
     def merge_id_columns(self, data):
         data[MERGED_ID_KEY] = None
 
+        # 1. Pull the IDs from your configured columns (userProvidedId)
         for id_column in self.config.PARSER_ID_COLUMNS:
             if id_column in data.columns:
                 missing_indices = data[MERGED_ID_KEY].isna()
                 data.loc[missing_indices, MERGED_ID_KEY] = data[id_column].loc[missing_indices].astype(str)
 
+        # 2. THE FIX: Group by the internal database ID and propagate the label
+        # This takes "057b" from the Save row and gives it to all the Move rows in that session
+        internal_session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if internal_session_col in data.columns:
+            # We replace common string nulls with actual NaNs so fillna works
+            data[MERGED_ID_KEY] = data[MERGED_ID_KEY].replace(['None', 'nan', ''], np.nan)
+
+            # Forward-fill and Back-fill within each internal session group
+            data[MERGED_ID_KEY] = data.groupby(internal_session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 3. Final Fallback for rows that truly have no ID info
         missing_indices = data[MERGED_ID_KEY].isna()
         data.loc[missing_indices, MERGED_ID_KEY] = DEFAULT_ID
 
