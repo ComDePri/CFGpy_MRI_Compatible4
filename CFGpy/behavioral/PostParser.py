@@ -81,6 +81,69 @@ class PostParser:
     def handle_empty_moves(self):
         """
         Merges consecutive duplicate shapes into single steps, updating their move/save times accordingly.
+        """
+        shape_id_idx = self.config.SHAPE_ID_IDX
+        shape_start_time_idx = self.config.SHAPE_MOVE_TIME_IDX
+        shape_save_time_idx = self.config.SHAPE_SAVE_TIME_IDX
+        shape_last_move_time_idx = self.config.SHAPE_MAX_MOVE_TIME_IDX
+
+        for player_data in self.all_players_data:
+            if not player_data[PARSED_ALL_SHAPES_KEY]:
+                continue
+
+            # === DEBUG START: Subject 080 Tracking ===
+            p_id = player_data.get(PARSED_PLAYER_ID_KEY, "Unknown")
+            is_target = p_id == "080"
+            if is_target:
+                initial_count = len(player_data[PARSED_ALL_SHAPES_KEY])
+                print(f"\n[DEBUG 080] Pre-merge count: {initial_count}")
+            # === DEBUG END ===
+
+            shapes_df = pd.DataFrame(player_data[PARSED_ALL_SHAPES_KEY])
+            shapes_df[shape_last_move_time_idx] = shapes_df[shape_start_time_idx]
+
+            # Grouping by consecutive duplicate shapes
+            shapes_df["group_id"] = self.group_consecutive_duplicates(shapes_df[shape_id_idx])
+
+            shapes_df = (shapes_df
+                         .groupby("group_id", as_index=False)
+                         .agg({shape_id_idx: lambda x: x.iloc[0],
+                               shape_start_time_idx: lambda x: x.iloc[0],
+                               shape_save_time_idx: "min",
+                               shape_last_move_time_idx: lambda x: x.iloc[-1]})
+                         .drop(columns="group_id"))
+
+            # Fixes possible column reordering caused by agg()
+            shapes = (shapes_df
+                      .reindex(sorted(shapes_df.columns), axis="columns")
+                      .values.tolist())
+
+            # === DEBUG START: Check for Post-Merge Integrity ===
+            if is_target:
+                from CFGpy.utils import is_neighbor  # Adjust import as needed
+                final_count = len(shapes)
+                print(f"[DEBUG 080] Post-merge count: {final_count} (Dropped {initial_count - final_count} stutters)")
+
+                # Check if the merge created a neighbor violation
+                for i in range(len(shapes) - 1):
+                    s1, s2 = int(shapes[i][shape_id_idx]), int(shapes[i + 1][shape_id_idx])
+                    if s1 != s2 and not is_neighbor(s1, s2):
+                        print(
+                            f"[DEBUG 080] ALERT: Non-neighboring transition created/detected at index {i}: {s1} -> {s2}")
+            # === DEBUG END ===
+
+            if len(shapes) > 0 and len(shapes[0]) <= shape_last_move_time_idx:
+                player_id = player_data[PARSED_PLAYER_ID_KEY]
+                msg = (f"CRITICAL ERROR: MRI Empty Move handling failed for player {player_id}.\n"
+                       f"Expected column index {shape_last_move_time_idx} to exist, but found only {len(shapes[0])} columns.")
+                raise CFGPipelineException(msg)
+
+            player_data[PARSED_ALL_SHAPES_KEY] = shapes
+
+
+    def handle_empty_moves_WITHOUT_DEBUGGING(self):
+        """
+        Merges consecutive duplicate shapes into single steps, updating their move/save times accordingly.
         This is only called in MRI mode, where empty moves are possible.
         It creates a 4th column in the shapes data, which holds the time of the last move in the merged step.
         If there hasn't been any empty moves, the last move time is equal to the start time.

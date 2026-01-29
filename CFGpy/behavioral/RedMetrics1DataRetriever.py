@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs
 from datetime import datetime
-
+from tqdm import tqdm
 
 import pandas as pd
 import requests
@@ -86,6 +86,111 @@ class RedMetrics1DataRetriever(DataRetriever):
     from datetime import datetime
 
     def _download_and_cache(self, url: str, target_directory: str = "downloaded_data_cache") -> dict:
+        """
+        Optimized paginated download. Replaces entry-by-entry duplicate checking
+        with vectorized pandas processing for speed and row-count integrity.
+        """
+        parsed_url = urlparse(url)
+        query_params = parse_qs(parsed_url.query)
+        os.makedirs(target_directory, exist_ok=True)
+        events_path = os.path.join(target_directory, "events.csv")
+
+        # 1. Setup URL & Game ID extraction
+        json_url = url.replace("/event.csv", "/event.json")
+        base_params = {"perPage": 500}
+
+        # Extract the real Game ID from the URL parameters
+        game_id_from_url = query_params.get('game', [None])[0]
+
+        # 2. Sequential Page Download
+        print("Downloading all pages from RedMetrics...")
+        response = requests.get(json_url, params={"page": 1, **base_params})
+        response.raise_for_status()
+        page_count = int(response.headers.get('x-page-count', 1))
+
+        all_events = []
+        for page in tqdm(range(1, page_count + 1), desc="Fetching Pages"):
+            r = requests.get(json_url, params={"page": page, **base_params})
+            r.raise_for_status()
+            all_events.extend(r.json())
+
+        # 3. Vectorized Processing
+        if not all_events:
+            raise ValueError(f"No events found for game {game_id_from_url}. Check your 'after' date filter.")
+
+        print(f"Downloaded {len(all_events)} events. Processing...")
+        df_events = pd.json_normalize(all_events, sep='.')
+
+        # 4. DYNAMIC COLUMN MAPPING (Fixes the 'player' KeyError)
+        player_col = next((col for col in ['player', 'player.id', 'playerId'] if col in df_events.columns), None)
+        if not player_col:
+            raise KeyError(f"Could not find player ID column. Found columns: {df_events.columns.tolist()}")
+
+        # 5. BULK PLAYER ENRICHMENT
+        unique_player_ids = df_events[player_col].unique()
+        player_cache = {}
+
+        print(f"Enriching {len(unique_player_ids)} unique players...")
+        for p_id in tqdm(unique_player_ids, desc="Players"):
+            try:
+                p_r = requests.get(f"https://api.creativeforagingtask.com/v1/player/{p_id}")
+                p_r.raise_for_status()
+                player_cache[p_id] = p_r.json()
+            except:
+                player_cache[p_id] = {'id': p_id}
+
+                # 6. CONSTRUCT PLAYER DATAFRAME & MERGE
+        player_df = pd.DataFrame.from_dict(player_cache, orient='index').reset_index()
+        player_df.rename(columns={'index': player_col}, inplace=True)
+
+        rename_map = {
+            'birthDate': 'playerBirthdate', 'region': 'playerRegion',
+            'country': 'playerCountry', 'gender': 'playerGender',
+            'externalId': 'playerExternalId', 'customData': 'playerCustomData'
+        }
+        player_df.rename(columns={k: v for k, v in rename_map.items() if k in player_df.columns}, inplace=True)
+
+        final_df = df_events.merge(player_df, on=player_col, how='left')
+
+        # 7. FINAL CLEANUP (Fixes the 'id' KeyError)
+        if player_col != 'playerId':
+            final_df.rename(columns={player_col: 'playerId'}, inplace=True)
+
+        id_col = next((col for col in ['id', 'id_x', '_id'] if col in final_df.columns), None)
+        if id_col:
+            final_df.drop_duplicates(subset=[id_col], keep='first', inplace=True)
+            if id_col != 'id':
+                final_df.rename(columns={id_col: 'id'}, inplace=True)
+
+        if 'userTime' in final_df.columns:
+            final_df.sort_values('userTime', inplace=True)
+
+        # 8. SYNTESIZE META FILES (Prevents "No game_versions found" error)
+        # This part ensures the tables get built so get_game_version_ids() works
+        final_df.to_csv(events_path, index=False)
+
+        # Use the ID we found in the URL
+        actual_game_id = game_id_from_url or (
+            str(final_df['game_id'].iloc[0]) if 'game_id' in final_df.columns else "Unknown")
+
+        # Create the small supporting CSVs the pipeline expects
+        pd.DataFrame([{'id': actual_game_id, 'name': f"Game_{actual_game_id}"}]).to_csv(
+            os.path.join(target_directory, "games.csv"), index=False)
+
+        # If the data has version info, use it; otherwise, create a dummy 1.0
+        v_col = next((c for c in ['gameVersion', 'version'] if c in final_df.columns), None)
+        v_ids = final_df[v_col].unique() if v_col else ['1.0']
+        pd.DataFrame({'id': v_ids, 'game_id': actual_game_id}).to_csv(
+            os.path.join(target_directory, "game_versions.csv"), index=False)
+
+        print(f"Successfully cached {len(final_df)} events in '{target_directory}'")
+
+        return {
+            "game_name": f"Game_{actual_game_id}",
+            "game_id": actual_game_id,
+            "csv_directory": target_directory
+        }
+    def _download_and_cache_I_THOUGHT_THIS_WORKS_BUT_IT_MISSES_SOME_DATA_ROWS(self, url: str, target_directory: str = "downloaded_data_cache") -> dict:
         """
         Downloads data in 30-day chunks to prevent server timeouts and synthesizes
         necessary CSV files (events, games, players, versions).
@@ -384,6 +489,69 @@ class RedMetrics1DataRetriever(DataRetriever):
         return self._retrieved_df
 
     def _create_df(self, *, game_version_id: str, after: str = None, before: str = None,
+                   event_type: str = None, section: str = None) -> pd.DataFrame:
+
+        # 1. Standard Filtering
+        filtered_df = self._events_df[self._events_df['gameVersion_id'] == game_version_id].copy()
+        if after: filtered_df = filtered_df[filtered_df['serverTime'] >= after]
+        if before: filtered_df = filtered_df[filtered_df['serverTime'] <= before]
+        if event_type: filtered_df = filtered_df[filtered_df['type'] == event_type]
+        if section: filtered_df = filtered_df[filtered_df['section'].str.contains(section, na=False)]
+
+        # Merge with player metadata
+        result_df = filtered_df.merge(self._players_df, left_on='player_id', right_on='id',
+                                      suffixes=('', '_player'))
+
+        # 2. STRICT ID EXTRACTION LOGIC
+        # Identify which columns exist (names vary between RM1 and RM2 exports)
+        custom_data_col = 'customData_player' if 'customData_player' in result_df.columns else 'playerCustomData'
+        external_id_col = 'externalId_player' if 'externalId_player' in result_df.columns else 'playerExternalId'
+        if 'externalId' in result_df.columns and external_id_col not in result_df.columns:
+            external_id_col = 'externalId'
+
+        def extract_real_id(row):
+            """Prioritizes manual input from JSON, ignores system noise."""
+            # A. Priority 1: The manual 'userProvidedId' inside the JSON blob
+            try:
+                cdata_raw = row.get(custom_data_col, '{}')
+                cdata = json.loads(cdata_raw) if isinstance(cdata_raw, str) else cdata_raw
+                up_id = cdata.get('userProvidedId')
+                if up_id and str(up_id).strip() and str(up_id).lower() not in ['nan', 'none', 'null']:
+                    return str(up_id).strip()
+            except:
+                pass
+
+            # B. Priority 2: Use the external ID column ONLY if it's not masked or empty
+            ext_val = str(row.get(external_id_col, '')).strip()
+            if ext_val and ext_val.lower() not in ['xxxxxx', 'nan', 'none', 'null', '']:
+                return ext_val
+
+            # C. Fallback: If no ID is found, we use a placeholder to flag it for exclusion
+            return "UNIDENTIFIED_SESSION"
+
+        # Apply to EVERY row to ensure UserProvidedID is captured globally
+        if not result_df.empty:
+            result_df['playerExternalId'] = result_df.apply(extract_real_id, axis=1)
+
+        # 3. Filtering using your String-based Exclusion List
+        if self._config and self._config.MANUALLY_EXCLUDED_IDS:
+            initial_count = len(result_df)
+            # Filter based on the 'playerExternalId' we just synthesized/recovered
+            result_df = result_df[~result_df['playerExternalId'].astype(str).isin(self._config.MANUALLY_EXCLUDED_IDS)]
+
+            dropped = initial_count - len(result_df)
+            if dropped > 0:
+                print(f"ID Policy applied: Dropped {dropped} rows (Excluded or Missing UserProvidedID).")
+
+        # 4. Standard Cleanup
+        if 'id_player' in result_df.columns: result_df.drop(columns=['id_player'], inplace=True)
+        if 'customData' in result_df.columns: result_df.rename(columns={'customData': 'eventCustomData'}, inplace=True)
+        if 'customData_player' in result_df.columns: result_df.rename(columns={'customData_player': 'playerCustomData'},
+                                                                      inplace=True)
+
+        return result_df
+
+    def _create_df_BAD_vERSION_WHICH_OVERRIDES_THE_USERPROVIDEDID(self, *, game_version_id: str, after: str = None, before: str = None,
                    event_type: str = None, section: str = None) -> pd.DataFrame:
 
         # 1. Standard Filtering

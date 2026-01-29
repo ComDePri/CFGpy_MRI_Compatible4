@@ -10,7 +10,7 @@
 
 # --- MRI SEGMENTATION LOGIC ---
   # These values define the "MRI Mode" behavior found in the old _consts.py
-  SEGMENTATION_ALGORITHM: "MRI",
+  SEGMENTATION_ALGORITHM: "non-MRI",
   MIN_EFFICIENCY_FOR_EXPLOIT: 0.8,    # Lower threshold (vs 2.0 in standard)
   MAX_PACE_FOR_MERGE: 10,             # Strict pace check (vs 10000 in standard)
   REMOVE_EMPTY_TIME_STEPS: true,      # Clean up empty steps (vs False)
@@ -100,7 +100,7 @@
   GALLERY_ORIG_N_CATEGORIES: 36446,  # d parameter for additive smoothing; all possible shapes
 
   ## Soft Filtering
-  MANUALLY_EXCLUDED_IDS: ["999999", "999998", "777777", "25", "26", "30", "48", "50", "59", "65", "71", "76", "78", "79", "85", "89", "94", "96", "102", "104", "106", "109", "111", "114", "119", "125", "126", "133", "143", "146", "147", "154", "155", "158", "160", "162", "172", "172n", "178", "179", "182", "184", "186", "198", "199", "201", "206", "212", "80", "219"],
+  MANUALLY_EXCLUDED_IDS: ["999999", "999998", "777777", "17", "18", "19", "25", "26", "30", "48", "50", "57", "057", "59", "65", "71", "76", "78", "79", "85", "89", "94", "96", "102", "104", "106", "109", "111", "114", "119", "125", "126", "133", "143", "146", "147", "154", "155", "158", "160", "162", "172", "172n", "178", "179", "182", "184", "186", "198", "199", "201", "206", "212", "80", "219"],
   MIN_N_MOVES: 80,  # exclude participants who made fewer moves than this
   MIN_N_CLUSTERS: 1,  # exclude participants who made fewer clusters than this
   MIN_GAME_DURATION_SEC: 600,  # exclude participants who played for less than this duration

@@ -113,6 +113,96 @@ class Parser:
     def merge_id_columns(self, data):
         data[MERGED_ID_KEY] = None
 
+        # 1. THE UNIVERSAL SEARCH
+        # We look for each key in the hierarchy defined in your config
+        for id_key in self.config.PARSER_ID_COLUMNS:
+            # Only work on rows that still need an ID
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # --- Strategy A: Flat Columns (Common in RM1/MRI CSVs) ---
+            if id_key in data.columns:
+                # Fill only the missing slots
+                data.loc[missing, MERGED_ID_KEY] = data.loc[missing, id_key]
+
+            # Refresh missing mask for Strategy B
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # --- Strategy B: Nested JSON (Common in RM2/MRI JSON blobs) ---
+            json_col = self.config.PARSER_JSON_COLUMN
+            if json_col in data.columns:
+                # Extract values from dicts, ensuring we don't pick up 'nan' strings
+                extracted = data.loc[missing, json_col].apply(
+                    lambda d: d.get(id_key) if isinstance(d, dict) else None
+                )
+                data.loc[missing, MERGED_ID_KEY] = extracted
+
+        # 2. SANITIZATION
+        # Convert everything to string but map all variants of 'null' back to real NaNs
+        # This prevents the 'nan' string from blocking the backfill
+        data[MERGED_ID_KEY] = data[MERGED_ID_KEY].astype(str).replace(
+            ['None', 'nan', 'null', '', 'NaN', 'nan', 'None'], np.nan
+        )
+
+        # 3. THE BACKFILL (Crucial for both RM1 MRI and RM2)
+        # Propagates the ID from 'Save' rows to 'Move' rows within the same session
+        session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if session_col in data.columns:
+            data[MERGED_ID_KEY] = data.groupby(session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 4. FINAL FALLBACK
+        # Use DEFAULT_ID (usually 'No ID Found' or 'None') if everything failed
+        data.loc[data[MERGED_ID_KEY].isna(), MERGED_ID_KEY] = DEFAULT_ID
+
+        return data
+
+    def merge_id_columns_GOOD_FOR_RM2(self, data):
+        data[MERGED_ID_KEY] = None
+
+        # 1. THE UNIVERSAL LOOP: Works for RM1 columns and RM2 dicts
+        json_col = self.config.PARSER_JSON_COLUMN  # 'playerCustomData'
+
+        for id_key in self.config.PARSER_ID_COLUMNS:
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # Strategy A: Check for flat columns (RM1 / RedMetrics 1)
+            if id_key in data.columns:
+                data.loc[missing, MERGED_ID_KEY] = data.loc[missing, id_key].astype(str)
+                missing = data[MERGED_ID_KEY].isna()  # Refresh missing mask
+
+            # Strategy B: Check inside the JSON blob (RM2 / RedMetrics 2)
+            if missing.any() and json_col in data.columns:
+                # We extract only the missing rows to save time
+                extracted = data.loc[missing, json_col].apply(
+                    lambda d: d.get(id_key) if isinstance(d, dict) else None
+                )
+                data.loc[missing, MERGED_ID_KEY] = extracted.astype(str)
+
+        # 2. SANITIZATION: Remove 'nan' strings that Pandas .astype(str) creates
+        data[MERGED_ID_KEY] = data[MERGED_ID_KEY].replace(['None', 'nan', 'null', '', 'NaN'], np.nan)
+
+        # 3. THE BACKFILL: Crucial for MRI and RM2 where labels are only on 'Save' rows
+        internal_session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if internal_session_col in data.columns:
+            data[MERGED_ID_KEY] = data.groupby(internal_session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 4. FINAL SAFETY
+        data.loc[data[MERGED_ID_KEY].isna(), MERGED_ID_KEY] = "No ID Found"
+
+        return data
+
+    def merge_id_columns_WORKED_WELL_FOR_RM1(self, data):
+        data[MERGED_ID_KEY] = None
+
         # 1. Pull the IDs from your configured columns (userProvidedId)
         for id_column in self.config.PARSER_ID_COLUMNS:
             if id_column in data.columns:
@@ -187,7 +277,6 @@ class Parser:
             gallery_save_indices, self.config.PARSER_TIME_COLUMN].values
         # Now that we have the save time in all move rows, we can get rid of save rows:
         game_data = game_data[game_data[self.config.EVENT_TYPE].isin([self.config.SHAPE_MOVE_EVENT_TYPE])]
-
         actions = game_data.loc[:, self.config.PARSED_GAME_HEADERS]
         if self.include_in_id:
             player_id_field = [game_data[MERGED_ID_KEY].iloc[0]] + self.include_in_id
