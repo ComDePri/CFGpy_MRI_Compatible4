@@ -79,6 +79,7 @@ class FeatureExtractor:
         self.input_data.players_data = [val[0] for val in best_games.values()]
         print(f"Filter complete: {len(self.input_data.players_data)} unique subjects remain.")
 
+
     def extract(self, verbose=False):
         # 1. Sync ID access (MRI JSON uses 'id', Standard uses 'player_id')
         for p in self.input_data.players_data:

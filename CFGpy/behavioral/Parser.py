@@ -248,7 +248,82 @@ class Parser:
 
         return all_parsed_games
 
+
     def parse_single_game(self, game_data):
+        # TODO: Note that this version of the function truncates the games at 720 seconds (12 minutes) to match the Vanilla games
+        parser_relevant_columns = self.parser_relevant_columns + self.include_in_id
+        game_data = game_data[parser_relevant_columns]
+
+        assert len(game_data[MERGED_ID_KEY].unique()) == 1
+        player_id_field = game_data[MERGED_ID_KEY].iloc[0]
+
+        # Identify the start search time (Tutorial End)
+        game_start_time = game_data[game_data[self.config.EVENT_TYPE] == self.config.TUTORIAL_END_EVENT_TYPE].iloc[0][
+            self.config.PARSER_TIME_COLUMN]
+
+        # --- TIME CUTOFF LOGIC ---
+        # Define 12 minutes (720 seconds) from the start
+        CUTOFF_SECONDS = 720
+        game_cutoff_time = game_start_time + pd.Timedelta(seconds=CUTOFF_SECONDS)
+
+        # Filter: Keep only rows between start and the 12-minute mark
+        game_data = game_data[
+            (game_data[self.config.PARSER_TIME_COLUMN] >= game_start_time) &
+            (game_data[self.config.PARSER_TIME_COLUMN] <= game_cutoff_time)
+            ]
+        # -------------------------
+
+        # Filter for relevant move/save events within that 12-minute window
+        game_data = game_data[game_data[self.config.EVENT_TYPE].isin(self.shape_relevant_event_types)]
+
+        # Create the initial entry (starting shape) at t=0
+        first_row = [player_id_field, self.config.SHAPE_MOVE_EVENT_TYPE,
+                     self.config.FIRST_SHAPE_SERVER_COORDS, np.nan, game_start_time]
+
+        # Ensure we include any additional ID fields in the placeholder row
+        if self.include_in_id:
+            for extra_col in self.include_in_id:
+                # Add value from the first available row for these extra ID columns
+                first_row.append(game_data[extra_col].iloc[0] if not game_data.empty else np.nan)
+
+        first_row_df = pd.DataFrame([first_row], columns=game_data.columns)
+        game_data = pd.concat([first_row_df, game_data], ignore_index=True)
+
+        # Convert datetime objects to "seconds since start" (0 to 720)
+        game_data[self.config.PARSER_TIME_COLUMN] = (game_data[self.config.PARSER_TIME_COLUMN] - game_start_time).apply(
+            lambda time_delta: time_delta.total_seconds())
+
+        # Binary conversion for shapes
+        game_data[self.config.SHAPE_MOVE_COLUMN] = game_data[self.config.SHAPE_MOVE_COLUMN].apply(
+            server_coords_to_binary_shape)
+
+        # Gallery Save Logic: link saves to the preceding move
+        game_data[self.config.GALLERY_SAVE_TIME_COLUMN] = None
+        gallery_save_indices = game_data[game_data[self.config.SHAPE_MOVE_COLUMN].isna()].index
+
+        # Ensure we don't try to index out of bounds if a save is the very first row
+        valid_save_indices = gallery_save_indices[gallery_save_indices > 0]
+        game_data.loc[valid_save_indices - 1, self.config.GALLERY_SAVE_TIME_COLUMN] = game_data.loc[
+            valid_save_indices, self.config.PARSER_TIME_COLUMN].values
+
+        # Clean up: remove the actual 'save' rows now that their timestamps are mapped to moves
+        game_data = game_data[game_data[self.config.EVENT_TYPE].isin([self.config.SHAPE_MOVE_EVENT_TYPE])]
+
+        actions = game_data.loc[:, self.config.PARSED_GAME_HEADERS]
+
+        if self.include_in_id:
+            player_id_field = [game_data[MERGED_ID_KEY].iloc[0]] + [game_data[col].iloc[0] for col in
+                                                                    self.include_in_id]
+
+        parsed_game = {
+            PARSED_PLAYER_ID_KEY: player_id_field,
+            PARSED_TIME_KEY: game_start_time.timestamp(),
+            PARSED_ALL_SHAPES_KEY: actions.values.tolist(),
+        }
+
+        return parsed_game
+
+    def parse_single_game_ORIG_WITHOUT_TIME_CUTOFF(self, game_data):
         parser_relevant_columns = self.parser_relevant_columns + self.include_in_id
         game_data = game_data[parser_relevant_columns]
 

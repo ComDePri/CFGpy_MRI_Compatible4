@@ -1,15 +1,14 @@
 import json
-
 import numpy as np
-
-from CFGpy.behavioral._utils import load_json, CFGPipelineException, segment_explore_exploit, \
-    prettify_games_json, segment_explore_exploit_mri
+import pandas as pd
+from itertools import groupby
+from CFGpy.behavioral._utils import (load_json, CFGPipelineException, segment_explore_exploit,
+                                     prettify_games_json, segment_explore_exploit_mri)
 from CFGpy.behavioral._consts import (PARSED_ALL_SHAPES_KEY, PARSED_PLAYER_ID_KEY, EXPLORE_KEY, EXPLOIT_KEY,
                                       INVALID_SHAPE_ERROR, NOT_A_NEIGHBOR_ERROR, POSTPARSER_OUTPUT_FILENAME)
 from CFGpy.behavioral import Configuration
 from CFGpy.utils import FilesHandler
-import pandas as pd
-from itertools import groupby
+
 
 def is_valid_transition(shape1: int, shape2: int) -> bool:
     """
@@ -24,7 +23,7 @@ def is_valid_transition(shape1: int, shape2: int) -> bool:
 
 
 class PostParser:
-    def __init__(self, *, parsed_data, is_rm1: bool = False,  is_mri: bool = False,
+    def __init__(self, *, parsed_data, is_rm1: bool = False, is_mri: bool = False,
                  config: Configuration = None):
         self.all_players_data = parsed_data
         self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
@@ -35,19 +34,73 @@ class PostParser:
 
     def postparse(self):
         self.convert_shape_ids()
+
+        # 1. Merge duplicates FIRST to get the clean move sequence
         if self.config.SEGMENTATION_ALGORITHM == "MRI":
             self.handle_empty_moves()
+
+        # 2. Heal the gaps between those clean moves
+        self.impute_missing_steps()
+
         self.add_explore_exploit()
-        # TODO: Remove bad games?
         return self.all_players_data
 
-    def convert_shape_ids(self):
-        """
-        Converts shape ids from their graphical representations to serial numbers.
-        Raises an exception if illegal shapes are found.
-        """
-        from CFGpy.utils import binary_shape_to_id as bin2id
+    def impute_missing_steps(self):
+        shape_id_idx = self.config.SHAPE_ID_IDX
+        time_idx = self.config.SHAPE_MOVE_TIME_IDX
+        save_idx = self.config.SHAPE_SAVE_TIME_IDX
+        max_move_idx = self.config.SHAPE_MAX_MOVE_TIME_IDX
 
+        all_valid_ids = list(FilesHandler().shape_network.nodes)
+
+        for player_data in self.all_players_data:
+            original_shapes = player_data[PARSED_ALL_SHAPES_KEY]
+            if len(original_shapes) < 2: continue
+
+            imputed_shapes = [original_shapes[0]]
+
+            for i in range(1, len(original_shapes)):
+                prev_shape = imputed_shapes[-1]
+                curr_shape = original_shapes[i]
+
+                id_a = int(prev_shape[shape_id_idx])
+                id_c = int(curr_shape[shape_id_idx])
+
+                if not is_valid_transition(id_a, id_c):
+                    bridge_id = None
+                    for b_candidate in all_valid_ids:
+                        if is_valid_transition(id_a, b_candidate) and is_valid_transition(b_candidate, id_c):
+                            bridge_id = int(b_candidate)  # Ensure standard Python int
+                            break
+
+                    if bridge_id is not None:
+                        # 1. CLONE current shape to preserve list length and non-target types
+                        bridge_record = list(curr_shape)
+
+                        # 2. Assign target values with strict type matching
+                        bridge_record[shape_id_idx] = bridge_id
+
+                        # Calculate time (ensure it's the same type as original)
+                        t_a, t_c = prev_shape[time_idx], curr_shape[time_idx]
+                        avg_time = type(t_a)((t_a + t_c) / 2)
+
+                        bridge_record[time_idx] = avg_time
+
+                        # Use the same 'empty' value used in your original data (usually None or NaN)
+                        bridge_record[save_idx] = None
+
+                        if max_move_idx is not None and len(bridge_record) > max_move_idx:
+                                                    bridge_record[max_move_idx] = avg_time
+
+                        imputed_shapes.append(bridge_record)
+
+                imputed_shapes.append(curr_shape)
+
+            player_data[PARSED_ALL_SHAPES_KEY] = imputed_shapes
+
+
+    def convert_shape_ids(self):
+        from CFGpy.utils import binary_shape_to_id as bin2id
         for player_data in self.all_players_data:
             shapes = player_data[PARSED_ALL_SHAPES_KEY]
             for i, shape in enumerate(shapes):
@@ -59,9 +112,6 @@ class PostParser:
                 except ValueError:
                     raise CFGPipelineException(INVALID_SHAPE_ERROR.format(shape_binary_repr, player_id))
 
-                if i > 0 and not is_valid_transition(shapes[i - 1][self.config.SHAPE_ID_IDX], shape_id):
-                    print(CFGPipelineException(NOT_A_NEIGHBOR_ERROR.format(i - 1, i, player_id)))
-                    # the exception is printed and not raised because many gaps are actually in the source data
 
     @staticmethod
     def group_consecutive_duplicates(elements):
