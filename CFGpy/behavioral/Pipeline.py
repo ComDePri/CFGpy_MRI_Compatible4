@@ -1,17 +1,30 @@
 from datetime import datetime, timezone
-from CFGpy.behavioral import Downloader, Parser, PostParser, FeatureExtractor, Configuration
+from CFGpy.behavioral import DataRetriever, RedMetrics1DataRetriever, RedMetrics2DataRetriever, Parser, \
+    PostParser, FeatureExtractor, Configuration
 from CFGpy.behavioral._consts import DEFAULT_FINAL_OUTPUT_FILENAME
 from CFGpy.behavioral._utils import CFGPipelineException
+import os
 
 
 class Pipeline:
-    def __init__(self, red_metrics_csv_url: str | None = None, output_filename=DEFAULT_FINAL_OUTPUT_FILENAME,
-                 config: Configuration = None):
-        self.output_filename = output_filename
-        self.config = config if config is not None else Configuration.default()
-        self.red_metrics_csv_url = red_metrics_csv_url
 
-        self.downloader = None
+    def __init__(self, game_name: str | None = None, game_id: str | None = None,
+                 is_rm1: bool = False, is_mri: bool = False,
+                 output_filename=DEFAULT_FINAL_OUTPUT_FILENAME, exclusion_file: str | None = None,
+                 config: Configuration = None, input_url: str | None = None,
+                 game_version_ids: list[str] | None = None):
+
+        self._game_version_ids = game_version_ids
+        self._game_name = game_name
+        self._game_id: str = game_id
+        self._is_rm1 = is_rm1
+        self._is_mri = is_mri
+        self._input_url = input_url
+
+        self.output_filename = output_filename
+        self.config = config or Configuration.default(is_rm1=is_rm1, is_mri=is_mri)
+
+        self.data_retriever = None
         self.raw_data = None
         self.parser = None
         self.parsed_data = None
@@ -20,13 +33,38 @@ class Pipeline:
         self.feature_extractor = None
         self.features_df = None
 
+        if exclusion_file:
+            self._merge_exclusions(exclusion_file)
+
+    def _merge_exclusions(self, exclusion_file_path: str):
+        """
+        Reads a text file of IDs (one per line) and adds them to the config's exclusion list.
+        """
+        if not os.path.exists(exclusion_file_path):
+            print(f"Warning: Exclusion file {exclusion_file_path} not found. Skipping.")
+            return
+
+        with open(exclusion_file_path, 'r') as f:
+            # Read lines, strip whitespace, ignore comments (#) and empty lines
+            new_ids = [line.split('#')[0].strip() for line in f]
+            new_ids = [str(x) for x in new_ids if x]  # Ensure they are strings
+
+        # Merge with existing config exclusions (tuples are immutable, so we create a new one)
+        current = list(self.config.MANUALLY_EXCLUDED_IDS)
+        self.config.MANUALLY_EXCLUDED_IDS = tuple(set(current + new_ids))
+        print(f"Added {len(new_ids)} IDs from blocklist to exclusion criteria.")
+
     def _get_now_str(self) -> str:
         """
-        Returns a string representation of the current time, formatted like server's time (given in self.config).
+        Returns a string representation of the current time,
+         formatted like server's time (given in self.config).
 
-        Python's datetime only allows specifying sub-second precision in microseconds (6 decimal places), but RedMetrics
-        URL only accept milliseconds (3 decimal places). Therefore, if the server's time format contains microseconds,
-        we manually replace that with milliseconds, to accommodate RedMetrics.
+        Python's datetime only allows specifying sub-second
+         precision in microseconds (6 decimal places), but RedMetrics
+        URL only accept milliseconds (3 decimal places).
+         Therefore, if the server's time format contains microseconds,
+        we manually replace that with milliseconds,
+         to accommodate RedMetrics.
         """
         now = datetime.now(timezone.utc)
         now_str = (
@@ -37,44 +75,57 @@ class Pipeline:
         )
         return now_str
 
-    def _add_url_to_config(self):
-        csv_url = self.downloader.csv_url
-        if "&before=" not in csv_url:
-            now_str = self._get_now_str()
-            csv_url += f"&before={now_str}"
+    def _add_input_params_to_config(self):
+        self.config.GAME_NAME = self.data_retriever._game_name
+        self.config.GAME_ID = self.data_retriever._game_id
 
-        self.config.RED_METRICS_CSV_URL = csv_url
+    def _get_data_retriever(self) -> DataRetriever:
+        if not self._is_rm1:
+            return (RedMetrics2DataRetriever(game_name=self._game_name,
+                                             game_id=self._game_id, config=self.config))
 
-    def _download(self, verbose):
+        return RedMetrics1DataRetriever(
+            game_name=self._game_name,  # CLI args (optional)
+            game_id=self._game_id,  # CLI args (optional)
+            config=self.config,
+            input_url=self._input_url,  # Pass the URL directly!
+            # We still pass these to support legacy behavior if needed,
+            # but we don't need to unpack **retriever_args anymore.
+            game_version_ids=self._game_version_ids)
+
+    def _retrieve_data(self, verbose):
         """
-        This method contains the downloading process exclusively. This can be overridden by deriving classes.
-        :param verbose: whether to print info during the downloading process
+        This method contains the data retrieval process exclusively.
+         This can be overridden by deriving classes.
+        :param verbose: whether to print info during the data retrieval process
         :return: raw data
         """
-        return self.downloader.download(verbose)
+        return self.data_retriever.retrieve_data(verbose=verbose)
 
-    def download(self, verbose=True):
+    def retrieve_data(self, verbose=True):
         """
-        Wraps raw data downloading with extra necessary functionality.
-        If you wish to override the downloading method, override _download, not this.
-        :param verbose: whether to print info during the downloading process
+        Wraps raw data retrieval with extra necessary functionality.
+        If you wish to override the data retrieval method, override _retrieve_data, not this.
+        :param verbose: whether to print info during the data retrieval process
         """
         if self.raw_data is not None:
-            raise CFGPipelineException("Raw data already downloaded")
+            raise CFGPipelineException("Raw data has already been retrieved")
 
-        self.downloader = Downloader(self.red_metrics_csv_url, config=self.config)
-        self._add_url_to_config()
+        self.data_retriever = self._get_data_retriever()
+        self._add_input_params_to_config()
 
         if verbose:
-            print("Downloading raw data...")
-        self.raw_data = self._download(verbose)
+            print("Retrieving raw data...")
+
+        self.raw_data = self._retrieve_data(verbose=verbose)
+        self.data_retriever.dump(verbose=verbose)
 
     def _parse(self):
         """
         This method contains the parsing process exclusively. This can be overridden by deriving classes.
         :return: parsed data
         """
-        self.parser = Parser(self.raw_data, self.config)
+        self.parser = Parser(raw_data=self.raw_data, config=self.config)
         return self.parser.parse()
 
     def parse(self, verbose):
@@ -84,7 +135,7 @@ class Pipeline:
         :param verbose: whether to print info during the parsing process
         """
         if self.raw_data is None:
-            raise CFGPipelineException("Raw data has to be downloaded before parsing")
+            raise CFGPipelineException("Raw data has to be retrieved before parsing")
         if self.parsed_data is not None:
             raise CFGPipelineException("Data already parsed")
 
@@ -98,7 +149,8 @@ class Pipeline:
         This method contains the post-parsing process exclusively. This can be overridden by deriving classes.
         :return: post-parsed data
         """
-        self.postparser = PostParser(self.parsed_data, self.config)
+        self.postparser = PostParser(parsed_data=self.parsed_data,
+                                     is_rm1=self._is_rm1, is_mri=self._is_mri, config=self.config)
         return self.postparser.postparse()
 
     def postparse(self, verbose):
@@ -117,7 +169,9 @@ class Pipeline:
         self.postparsed_data = self._postparse()
 
     def _extract_features(self, verbose):
-        self.feature_extractor = FeatureExtractor(self.postparsed_data, self.config)
+        self.feature_extractor = FeatureExtractor(preprocessed_data=self.postparsed_data,
+                                                  is_rm1=self._is_rm1, is_mri=self._is_mri,
+                                                  config=self.config)
         return self.feature_extractor.extract(verbose)
 
     def extract_features(self, verbose):
@@ -136,27 +190,38 @@ class Pipeline:
             print(f"Results written successfully to: {self.output_filename}")
 
     def run_pipeline(self, verbose=True):
-        self.download(verbose)
-        self.parse(verbose)
-        self.postparse(verbose)
-        self.extract_features(verbose)
+        self.retrieve_data(verbose=verbose)
+        self.parse(verbose=verbose)
+        self.postparse(verbose=verbose)
+        self.extract_features(verbose=verbose)
         return self.features_df
 
 
 def main():
     import argparse
-
     argparser = argparse.ArgumentParser(description="Run CFG behavioral data pipeline")
-    argparser.add_argument("--url", help='Web address of the "Download all pages as CSV"')
+    argparser.add_argument("--game-name", help='The name of the game.')
+    argparser.add_argument("--game-id", help='The id of the game.')
+    argparser.add_argument("--game-version-ids", nargs="+",
+                           help='A list of the game version ids that you want to retrieve.')
     argparser.add_argument("--config-path", help='The path to the yml file that contains the configuration')
     argparser.add_argument("-o", "--output", default=DEFAULT_FINAL_OUTPUT_FILENAME, dest="output_filename",
-                        help='Filename of output CSV')
+                           help='Filename of output CSV')
+    argparser.add_argument("--rm1", action="store_true", help="Use RM1 data")
+    argparser.add_argument("--mri", action="store_true", help="Load the MRI configuration defaults")
+    argparser.add_argument("--exclude-file", help="Path to text file with IDs to exclude")
+    argparser.add_argument("--input-data-url", help="The RedMetrics data URL to download data from.")
+
     args = argparser.parse_args()
-    
-    config: Configuration | None = Configuration.from_yaml(yaml_path=args.config_path) if args.config_path else None
-    
-    pl = Pipeline(red_metrics_csv_url=args.url, output_filename=args.output_filename, config=config)
-    
+
+    config: Configuration | None = Configuration.from_yaml(
+        yaml_path=args.config_path) if args.config_path else None
+
+    pl = Pipeline(game_name=args.game_name, game_id=args.game_id,
+                  is_rm1=args.rm1, is_mri=args.mri, output_filename=args.output_filename,
+                  exclusion_file=args.exclude_file, config=config, input_url=args.input_data_url,
+                  game_version_ids=args.game_version_ids)
+
     pl.run_pipeline()
 
 

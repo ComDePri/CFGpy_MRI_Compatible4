@@ -141,10 +141,11 @@ class FilesHandler:
     def get_file(self, *, file_name: str) -> None:
         local_file_path: str = os.path.join(FileNames.CACHE_DIR, file_name)
         branch: str = os.getenv("GIT_BRANCH", "main")
-        if not os.path.exists(local_file_path) or self.re_download_file(
-            local_file_path=local_file_path, repo_owner="ComDePri", repo_name="CFGpy", git_file_path=f"CFGpy/files/{file_name}", 
-            branch=branch
-            ):
+        #if not os.path.exists(local_file_path) or self.re_download_file( #todo: RETURN TO THIS LINE
+        #    local_file_path=local_file_path, repo_owner="ComDePri", repo_name="CFGpy", git_file_path=f"CFGpy/files/{file_name}",
+        #    branch=branch
+        #    ):
+        if not os.path.exists(local_file_path):
             self.get_raw_file_from_github(file_name=file_name, branch=branch)
         return None
     

@@ -21,9 +21,9 @@ class Parser:
         parse_datetime_re_millisecond,
     ]
 
-    def __init__(self, raw_data, config: Configuration = None):
+    def __init__(self, *, raw_data: pd.DataFrame, is_rm1: bool = False, config: Configuration = None):
         self.raw_data = raw_data
-        self.config = config if config is not None else Configuration.default()
+        self.config = config or Configuration.default(is_rm1=is_rm1)
         self.parsed_data = None
 
         self.include_in_id = list(self.config.INCLUDE_IN_PARSER_ID)
@@ -61,21 +61,27 @@ class Parser:
         self.config.to_yaml(path)
 
     def _prepare_data(self):
-        data = self.patchfix_csv_data(self.raw_data)
-        data[self.config.PARSER_JSON_COLUMN] = data[self.config.PARSER_JSON_COLUMN].apply(json.loads)
-        all_json_keys = self.get_all_json_keys_from_csv_data(data)
-        for key in all_json_keys:
-            # Take the json inside the csv file and turn them into columns
-            data[key] = data[self.config.PARSER_JSON_COLUMN].apply(lambda json_dict: json_dict.get(key))
+        data = self.raw_data.copy()
 
-        data[self.config.SHAPE_MOVE_COLUMN] = data[self.config.SHAPE_MOVE_COLUMN].apply(
-            lambda val: sorted(json.loads(val)) if type(val) is str else np.nan)
-        data[self.config.SHAPE_SAVE_COLUMN] = data[self.config.SHAPE_SAVE_COLUMN].apply(
-            lambda val: sorted(json.loads(val)) if type(val) is str else np.nan)
+        # 1. Standardize column names based on config
+        # If the CSV has 'type', map it to what the parser expects
+        if self.config.EVENT_TYPE in data.columns and self.config.EVENT_TYPE != "eventType":
+            data['eventType'] = data[self.config.EVENT_TYPE]
 
+        # 2. Backfill IDs (This is where Subject 057b is fixed)
         data = self.merge_id_columns(data)
-        data[self.config.PARSER_TIME_COLUMN] = pd.to_datetime(data[self.config.PARSER_TIME_COLUMN],
-                                                              format=self.config.SERVER_DATE_FORMAT)
+
+        # 3. Expand JSON (MRI uses playerCustomData)
+        json_col = self.config.PARSER_JSON_COLUMN
+        if json_col in data.columns:
+            data[json_col] = data[json_col].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
+            # Flatten keys (like userProvidedId) into top-level columns
+            all_keys = self.get_all_json_keys_from_csv_data(data)
+            for key in all_keys:
+                data[key] = data[json_col].apply(lambda d: d.get(key) if isinstance(d, dict) else np.nan)
+
+        # 4. Final cleaning and sorting
+        data[self.config.PARSER_TIME_COLUMN] = pd.to_datetime(data[self.config.PARSER_TIME_COLUMN], errors='coerce')
         data = data.sort_values(by=self.config.PARSER_TIME_COLUMN).reset_index(drop=True)
 
         return data
@@ -83,15 +89,19 @@ class Parser:
     def patchfix_csv_data(self, data):
         '''Small patchy bugfix for temporary problems'''
         # Bug no.1 sometimes player external id is this instead of a random number
-        data.loc[data['playerExternalId'] == '${rand://int/100000:10000000}', 'playerExternalId'] = None
+        if 'playerExternalId' in data.columns: # For rm2 this column does not exist
+            data.loc[data['playerExternalId'] == '${rand://int/100000:10000000}', 'playerExternalId'] = None
 
         # Bug no.2 sometimes the endPosition and shape columns switch places
         switched_column_indices = np.flatnonzero(
-            data['customData.endPosition'].apply(lambda x: len(json.loads(x)) == 10 if type(x) is str else False))
+            data['customData.endPosition'].apply(lambda x: len(json.loads(x)) == 10 if (isinstance(x, str) and x.strip()) else False))
         data.loc[switched_column_indices, 'customData.shape'] = data.loc[
             switched_column_indices, 'customData.endPosition']
         data['customData.shape'] = data['customData.shape'].apply(
-            lambda x: json.loads(x) if type(x) is str else []).apply(lambda x: str(x) if len(x) == 10 else np.nan)
+            lambda x: x if isinstance(x, list) 
+            else json.loads(x) if isinstance(x, str) 
+            else []).apply(lambda x: str(x) if len(x) == 10 else np.nan
+        )
 
         return data
 
@@ -103,17 +113,128 @@ class Parser:
     def merge_id_columns(self, data):
         data[MERGED_ID_KEY] = None
 
+        # 1. THE UNIVERSAL SEARCH
+        # We look for each key in the hierarchy defined in your config
+        for id_key in self.config.PARSER_ID_COLUMNS:
+            # Only work on rows that still need an ID
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # --- Strategy A: Flat Columns (Common in RM1/MRI CSVs) ---
+            if id_key in data.columns:
+                # Fill only the missing slots
+                data.loc[missing, MERGED_ID_KEY] = data.loc[missing, id_key]
+
+            # Refresh missing mask for Strategy B
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # --- Strategy B: Nested JSON (Common in RM2/MRI JSON blobs) ---
+            json_col = self.config.PARSER_JSON_COLUMN
+            if json_col in data.columns:
+                # Extract values from dicts, ensuring we don't pick up 'nan' strings
+                extracted = data.loc[missing, json_col].apply(
+                    lambda d: d.get(id_key) if isinstance(d, dict) else None
+                )
+                data.loc[missing, MERGED_ID_KEY] = extracted
+
+        # 2. SANITIZATION
+        # Convert everything to string but map all variants of 'null' back to real NaNs
+        # This prevents the 'nan' string from blocking the backfill
+        data[MERGED_ID_KEY] = data[MERGED_ID_KEY].astype(str).replace(
+            ['None', 'nan', 'null', '', 'NaN', 'nan', 'None'], np.nan
+        )
+
+        # 3. THE BACKFILL (Crucial for both RM1 MRI and RM2)
+        # Propagates the ID from 'Save' rows to 'Move' rows within the same session
+        session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if session_col in data.columns:
+            data[MERGED_ID_KEY] = data.groupby(session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 4. FINAL FALLBACK
+        # Use DEFAULT_ID (usually 'No ID Found' or 'None') if everything failed
+        data.loc[data[MERGED_ID_KEY].isna(), MERGED_ID_KEY] = DEFAULT_ID
+
+        return data
+
+    def merge_id_columns_GOOD_FOR_RM2(self, data):
+        data[MERGED_ID_KEY] = None
+
+        # 1. THE UNIVERSAL LOOP: Works for RM1 columns and RM2 dicts
+        json_col = self.config.PARSER_JSON_COLUMN  # 'playerCustomData'
+
+        for id_key in self.config.PARSER_ID_COLUMNS:
+            missing = data[MERGED_ID_KEY].isna()
+            if not missing.any():
+                break
+
+            # Strategy A: Check for flat columns (RM1 / RedMetrics 1)
+            if id_key in data.columns:
+                data.loc[missing, MERGED_ID_KEY] = data.loc[missing, id_key].astype(str)
+                missing = data[MERGED_ID_KEY].isna()  # Refresh missing mask
+
+            # Strategy B: Check inside the JSON blob (RM2 / RedMetrics 2)
+            if missing.any() and json_col in data.columns:
+                # We extract only the missing rows to save time
+                extracted = data.loc[missing, json_col].apply(
+                    lambda d: d.get(id_key) if isinstance(d, dict) else None
+                )
+                data.loc[missing, MERGED_ID_KEY] = extracted.astype(str)
+
+        # 2. SANITIZATION: Remove 'nan' strings that Pandas .astype(str) creates
+        data[MERGED_ID_KEY] = data[MERGED_ID_KEY].replace(['None', 'nan', 'null', '', 'NaN'], np.nan)
+
+        # 3. THE BACKFILL: Crucial for MRI and RM2 where labels are only on 'Save' rows
+        internal_session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if internal_session_col in data.columns:
+            data[MERGED_ID_KEY] = data.groupby(internal_session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 4. FINAL SAFETY
+        data.loc[data[MERGED_ID_KEY].isna(), MERGED_ID_KEY] = "No ID Found"
+
+        return data
+
+    def merge_id_columns_WORKED_WELL_FOR_RM1(self, data):
+        data[MERGED_ID_KEY] = None
+
+        # 1. Pull the IDs from your configured columns (userProvidedId)
         for id_column in self.config.PARSER_ID_COLUMNS:
             if id_column in data.columns:
                 missing_indices = data[MERGED_ID_KEY].isna()
                 data.loc[missing_indices, MERGED_ID_KEY] = data[id_column].loc[missing_indices].astype(str)
 
+        # 2. THE FIX: Group by the internal database ID and propagate the label
+        # This takes "057b" from the Save row and gives it to all the Move rows in that session
+        internal_session_col = self.config.UNIQUE_INTERNAL_ID_COLUMN
+        if internal_session_col in data.columns:
+            # We replace common string nulls with actual NaNs so fillna works
+            data[MERGED_ID_KEY] = data[MERGED_ID_KEY].replace(['None', 'nan', ''], np.nan)
+
+            # Forward-fill and Back-fill within each internal session group
+            data[MERGED_ID_KEY] = data.groupby(internal_session_col)[MERGED_ID_KEY].transform(
+                lambda x: x.ffill().bfill()
+            )
+
+        # 3. Final Fallback for rows that truly have no ID info
         missing_indices = data[MERGED_ID_KEY].isna()
         data.loc[missing_indices, MERGED_ID_KEY] = DEFAULT_ID
 
         return data
 
     def _apply_hard_filters(self, game):
+        # Get the player ID from the current group (game)
+        # We use iloc[0] because all rows in this group belong to the same player
+        player_id = str(game[self.config.UNIQUE_INTERNAL_ID_COLUMN].iloc[0])
+
+        # Check against the exclusion list from config
+        if player_id in self.config.MANUALLY_EXCLUDED_IDS:
+            return False
         return self.is_game_started(game)
 
     def is_game_started(self, game):
@@ -127,7 +248,82 @@ class Parser:
 
         return all_parsed_games
 
+
     def parse_single_game(self, game_data):
+        # TODO: Note that this version of the function truncates the games at 720 seconds (12 minutes) to match the Vanilla games
+        parser_relevant_columns = self.parser_relevant_columns + self.include_in_id
+        game_data = game_data[parser_relevant_columns]
+
+        assert len(game_data[MERGED_ID_KEY].unique()) == 1
+        player_id_field = game_data[MERGED_ID_KEY].iloc[0]
+
+        # Identify the start search time (Tutorial End)
+        game_start_time = game_data[game_data[self.config.EVENT_TYPE] == self.config.TUTORIAL_END_EVENT_TYPE].iloc[0][
+            self.config.PARSER_TIME_COLUMN]
+
+        # --- TIME CUTOFF LOGIC ---
+        # Define 12 minutes (720 seconds) from the start
+        CUTOFF_SECONDS = 720
+        game_cutoff_time = game_start_time + pd.Timedelta(seconds=CUTOFF_SECONDS)
+
+        # Filter: Keep only rows between start and the 12-minute mark
+        game_data = game_data[
+            (game_data[self.config.PARSER_TIME_COLUMN] >= game_start_time) &
+            (game_data[self.config.PARSER_TIME_COLUMN] <= game_cutoff_time)
+            ]
+        # -------------------------
+
+        # Filter for relevant move/save events within that 12-minute window
+        game_data = game_data[game_data[self.config.EVENT_TYPE].isin(self.shape_relevant_event_types)]
+
+        # Create the initial entry (starting shape) at t=0
+        first_row = [player_id_field, self.config.SHAPE_MOVE_EVENT_TYPE,
+                     self.config.FIRST_SHAPE_SERVER_COORDS, np.nan, game_start_time]
+
+        # Ensure we include any additional ID fields in the placeholder row
+        if self.include_in_id:
+            for extra_col in self.include_in_id:
+                # Add value from the first available row for these extra ID columns
+                first_row.append(game_data[extra_col].iloc[0] if not game_data.empty else np.nan)
+
+        first_row_df = pd.DataFrame([first_row], columns=game_data.columns)
+        game_data = pd.concat([first_row_df, game_data], ignore_index=True)
+
+        # Convert datetime objects to "seconds since start" (0 to 720)
+        game_data[self.config.PARSER_TIME_COLUMN] = (game_data[self.config.PARSER_TIME_COLUMN] - game_start_time).apply(
+            lambda time_delta: time_delta.total_seconds())
+
+        # Binary conversion for shapes
+        game_data[self.config.SHAPE_MOVE_COLUMN] = game_data[self.config.SHAPE_MOVE_COLUMN].apply(
+            server_coords_to_binary_shape)
+
+        # Gallery Save Logic: link saves to the preceding move
+        game_data[self.config.GALLERY_SAVE_TIME_COLUMN] = None
+        gallery_save_indices = game_data[game_data[self.config.SHAPE_MOVE_COLUMN].isna()].index
+
+        # Ensure we don't try to index out of bounds if a save is the very first row
+        valid_save_indices = gallery_save_indices[gallery_save_indices > 0]
+        game_data.loc[valid_save_indices - 1, self.config.GALLERY_SAVE_TIME_COLUMN] = game_data.loc[
+            valid_save_indices, self.config.PARSER_TIME_COLUMN].values
+
+        # Clean up: remove the actual 'save' rows now that their timestamps are mapped to moves
+        game_data = game_data[game_data[self.config.EVENT_TYPE].isin([self.config.SHAPE_MOVE_EVENT_TYPE])]
+
+        actions = game_data.loc[:, self.config.PARSED_GAME_HEADERS]
+
+        if self.include_in_id:
+            player_id_field = [game_data[MERGED_ID_KEY].iloc[0]] + [game_data[col].iloc[0] for col in
+                                                                    self.include_in_id]
+
+        parsed_game = {
+            PARSED_PLAYER_ID_KEY: player_id_field,
+            PARSED_TIME_KEY: game_start_time.timestamp(),
+            PARSED_ALL_SHAPES_KEY: actions.values.tolist(),
+        }
+
+        return parsed_game
+
+    def parse_single_game_ORIG_WITHOUT_TIME_CUTOFF(self, game_data):
         parser_relevant_columns = self.parser_relevant_columns + self.include_in_id
         game_data = game_data[parser_relevant_columns]
 
@@ -151,12 +347,11 @@ class Parser:
         game_data[self.config.GALLERY_SAVE_TIME_COLUMN] = None
 
         gallery_save_indices = game_data[self.config.SHAPE_MOVE_COLUMN].isna()[
-            game_data[self.config.SHAPE_MOVE_COLUMN].isna()].index
+            game_data[self.config.SHAPE_MOVE_COLUMN].isna()].index # TODO: retrieves indices of all the None values
         game_data.loc[gallery_save_indices - 1, self.config.GALLERY_SAVE_TIME_COLUMN] = game_data.loc[
             gallery_save_indices, self.config.PARSER_TIME_COLUMN].values
         # Now that we have the save time in all move rows, we can get rid of save rows:
         game_data = game_data[game_data[self.config.EVENT_TYPE].isin([self.config.SHAPE_MOVE_EVENT_TYPE])]
-
         actions = game_data.loc[:, self.config.PARSED_GAME_HEADERS]
         if self.include_in_id:
             player_id_field = [game_data[MERGED_ID_KEY].iloc[0]] + self.include_in_id
