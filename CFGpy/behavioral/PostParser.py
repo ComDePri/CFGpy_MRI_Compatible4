@@ -81,16 +81,17 @@ class PostParser:
                         bridge_record[shape_id_idx] = bridge_id
 
                         # Calculate time (ensure it's the same type as original)
-                        t_a, t_c = prev_shape[time_idx], curr_shape[time_idx]
-                        avg_time = type(t_a)((t_a + t_c) / 2)
-
-                        bridge_record[time_idx] = avg_time
+                        # TODO: Actually skip this because it introduces some problems downstream, which we can see when comparing the feautres with and without imputations.
+                        # TODO: Actually skip this because it introduces some problems downstream, which we can see when comparing the feautres with and without imputations.
+                        #t_a, t_c = prev_shape[time_idx], curr_shape[time_idx]
+                        #avg_time = type(t_a)((t_a + t_c) / 2)
+                        #bridge_record[time_idx] = avg_time
 
                         # Use the same 'empty' value used in your original data (usually None or NaN)
                         bridge_record[save_idx] = None
 
-                        if max_move_idx is not None and len(bridge_record) > max_move_idx:
-                                                    bridge_record[max_move_idx] = avg_time
+                        #if max_move_idx is not None and len(bridge_record) > max_move_idx:
+                        #                            bridge_record[max_move_idx] = avg_time
 
                         imputed_shapes.append(bridge_record)
 
